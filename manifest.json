@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Work Time Calculator",
+  "version": "0.3.0",
+  "description": "Read-only work hours calculator to see what time you need to clock out by.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://paychex.centralservers.com/*"
+  ],
+  "action": {
+    "default_title": "Weekly hours",
+    "default_popup": "popup.html"
+  }
+}

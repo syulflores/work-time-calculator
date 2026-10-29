@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h2>Weekly hours</h2>
+      <span>Paychex · local calculator</span>
+    </header>
+    <div id="status" role="status">
+      Open your Paychex timecard tab, then refresh.
+    </div>
+    <section class="settings">
+      <label
+        >Week starts
+        <select id="start">
+          <option value="0">Sunday</option>
+          <option value="1">Monday</option>
+          <option value="6">Saturday</option>
+        </select></label
+      ><label
+        >Weekly target (hours)
+        <input
+          id="target"
+          type="number"
+          min="1"
+          max="168"
+          step="0.25"
+          value="40" /></label
+      ><label
+        >Remaining unpaid break (minutes)
+        <input id="break" type="number" min="0" max="480" step="1" value="0"
+      /></label>
+    </section>
+    <section class="settings">
+      <label
+        >Today clock-in (manual fallback)
+        <input id="manualIn" type="time" /></label
+      ><label
+        ><input id="manualEnabled" type="checkbox" /> Use this clock-in to
+        estimate clock-out</label
+      ><button id="clearManual" type="button">Clear manual clock-in</button>
+    </section>
+    <div class="metrics">
+      <div><small>Recorded paid time</small><strong id="worked">—</strong></div>
+      <div>
+        <small>Remaining to target</small><strong id="remaining">—</strong>
+      </div>
+      <div><small>Projected clock-out</small><strong id="out">—</strong></div>
+    </div>
+    <p id="period"></p>
+    <p id="detail"></p>
+    <button id="refresh">Refresh from Paychex</button>
+    <p class="foot">
+      Read-only. The estimate is not an official payroll total. Keep Paychex
+      open and signed in. This extension does not clock you in or out.
+    </p>
+    <script src="popup.js"></script>
+  </body>
+</html>
