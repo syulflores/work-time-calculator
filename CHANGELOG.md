@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.2.1
+
+- fix: reordered elements and condensed some other elements
+
 ## 0.2.0
 
 - feat: added daily option for hour calculation

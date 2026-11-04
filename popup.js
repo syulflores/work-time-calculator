@@ -259,12 +259,6 @@ async function refreshPaychex() {
       });
       calculate();
     });
-  $("clearManual").addEventListener("click", () => {
-    $("manualIn").value = "";
-    $("manualEnabled").checked = false;
-    chrome.storage.local.remove(["manualIn", "manualEnabled"]);
-    calculate();
-  });
   $("refresh").addEventListener("click", refresh);
   refresh();
   setInterval(calculate, 30000);

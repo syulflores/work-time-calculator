@@ -16,11 +16,6 @@
     <div id="status" role="status">
       Enter your recorded hours and clock-in below.
     </div>
-    <section class="settings" id="manualSettings">
-      <label>Recorded paid time (hours)
-        <input id="manualHours" type="number" min="0" step="0.25" value="0" />
-      </label>
-    </section>
     <section class="settings">
       <label>Calculate for
         <select id="periodMode">
@@ -43,20 +38,27 @@
           min="1"
           max="168"
           step="0.25"
-          value="40" /></label
-      ><label
-        >Remaining unpaid break (minutes)
-        <input id="break" type="number" min="0" max="480" step="1" value="0"
-      /></label>
+          value="40" /></label>
+    </section>
+    <section class="settings">
+      <div class="clock-in-row">
+        <input id="manualEnabled" type="checkbox"
+          aria-label="Use this clock-in to estimate clock-out"
+          title="Use this clock-in to estimate clock-out" />
+        <label for="manualIn">Today clock-in</label>
+        <input id="manualIn" type="time" />
+      </div>
+    </section>
+    <section class="settings" id="manualSettings">
+      <label>Recorded paid time (hours)
+        <input id="manualHours" type="number" min="0" step="0.25" value="0" />
+      </label>
     </section>
     <section class="settings">
       <label
-        >Today clock-in
-        <input id="manualIn" type="time" /></label
-      ><label
-        ><input id="manualEnabled" type="checkbox" /> Use this clock-in to
-        estimate clock-out</label
-      ><button id="clearManual" type="button">Clear manual clock-in</button>
+        >Remaining unpaid break (minutes)
+        <input id="break" type="number" min="0" max="480" step="1" value="0"
+      /></label>
     </section>
     <div class="metrics">
       <div><small>Recorded paid time</small><strong id="worked">—</strong></div>
