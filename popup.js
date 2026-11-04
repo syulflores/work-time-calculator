@@ -14,7 +14,35 @@ const dateTime = (ms) =>
     hour: "numeric",
     minute: "2-digit",
   });
+// Register future modes with their own refresh handler here.
+const modes = {
+  manual: { label: "Manual", refresh: refreshManual },
+  paychex: { label: "Paychex", refresh: refreshPaychex },
+};
 let data = null;
+let refreshId = 0;
+const isManual = () => $("mode").value === "manual";
+
+function refreshManual() {
+  data = { entries: [] };
+  $("status").textContent = "Manual mode: enter your recorded hours and today's clock-in.";
+  calculate();
+}
+
+function refresh() {
+  refreshId++;
+  data = null;
+  $("refresh").disabled = false;
+  $("manualSettings").hidden = !isManual();
+  $("refresh").textContent = isManual() ? "Recalculate" : "Refresh from Paychex";
+  $("foot").textContent = isManual()
+    ? "The estimate is not an official payroll total. This extension does not clock you in or out."
+    : "Read-only. The estimate is not an official payroll total. Keep Paychex open and signed in. This extension does not clock you in or out.";
+  for (const id of ["worked", "remaining", "out"]) $(id).textContent = "?";
+  $("period").textContent = "";
+  $("detail").textContent = "";
+  return modes[$("mode").value].refresh();
+}
 const clockMinutes = (s) => {
   if (!/^\d{2}:\d{2}$/.test(s || "")) return null;
   const [h, m] = s.split(":").map(Number);
@@ -39,7 +67,7 @@ function calculate() {
   });
   // One top-level timecard group is counted once; never also add TimeCardDetails.
   const seen = new Set();
-  let recorded = 0,
+  let recorded = isManual() ? Math.max(0, Number($("manualHours").value) || 0) * 3600 : 0,
     openEntries = 0;
   for (const x of entries) {
     const k = [x.date, x.in, x.out, x.regular, x.ot].join("|");
@@ -103,17 +131,18 @@ function calculate() {
   $("remaining").textContent = fmt(remaining);
   $("out").textContent = clockout;
   $("period").textContent =
-    `Workweek: ${first} through ${last} · ${entries.length} timecard rows`;
+    `Workweek: ${first} through ${last} · ${isManual() ? "manual entry" : entries.length + " timecard rows"}`;
   $("detail").textContent =
     liveInfo +
     (open || manualStart !== null
       ? ""
       : "No open clock-in row returned. Enter today’s clock-in above and enable manual mode. ") +
     (data.warning || "") +
-    " Times are estimates; verify Paychex rounding and payroll policies.";
+    (isManual() ? " Times are estimates; verify your payroll policies." : " Times are estimates; verify Paychex rounding and payroll policies.");
 }
 
-async function refresh() {
+async function refreshPaychex() {
+  const requestId = refreshId;
   const btn = $("refresh");
   btn.disabled = true;
   $("status").textContent = "Checking captured Paychex timecard…";
@@ -145,6 +174,7 @@ async function refresh() {
       throw Error(
         "No timecard captured. Leave Paychex open, reload its timecard page, and click Refresh again.",
       );
+    if (requestId !== refreshId) return;
     data = r;
     data.warning =
       "Data captured from Paychex at " +
@@ -154,23 +184,36 @@ async function refresh() {
       `Loaded ${r.entries.length} records from Paychex.`;
     calculate();
   } catch (e) {
-    $("status").textContent = "Notice: " + e.message;
+    if (requestId === refreshId) $("status").textContent = "Notice: " + e.message;
   } finally {
-    btn.disabled = false;
+    if (requestId === refreshId) btn.disabled = false;
   }
 }
 
 (async () => {
   const saved = await chrome.storage.local.get([
+    "mode",
+    "manualHours",
     "start",
     "target",
     "break",
     "manualIn",
     "manualEnabled",
   ]);
-  for (const key of ["start", "target", "break"])
+  for (const [value, mode] of Object.entries(modes)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = mode.label;
+    $("mode").append(option);
+  }
+  $("mode").value = Object.hasOwn(modes, saved.mode) ? saved.mode : "manual";
+  $("mode").addEventListener("change", () => {
+    chrome.storage.local.set({ mode: $("mode").value });
+    refresh();
+  });
+  for (const key of ["start", "target", "break", "manualHours"])
     if (saved[key] != null) $(key).value = saved[key];
-  for (const key of ["start", "target", "break"])
+  for (const key of ["start", "target", "break", "manualHours"])
     $(key).addEventListener("change", () => {
       chrome.storage.local.set({ [key]: $(key).value });
       calculate();

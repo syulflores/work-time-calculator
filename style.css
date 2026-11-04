@@ -17,6 +17,31 @@ header {
   margin-bottom: 14px;
 }
 
+.heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.heading-row h2 {
+  white-space: nowrap;
+}
+
+#mode {
+  min-width: 0;
+  max-width: 120px;
+  padding: 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: white;
+  color: inherit;
+}
+
+[hidden] {
+  display: none !important;
+}
+
 h2 {
   margin: 0;
   font-size: 20px;

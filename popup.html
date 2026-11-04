@@ -7,12 +7,20 @@
   </head>
   <body>
     <header>
-      <h2>Work Time Left</h2>
+      <div class="heading-row">
+        <h2>Work Time Left</h2>
+        <select id="mode" aria-label="Calculator mode"></select>
+      </div>
       <span>Local calculator</span>
     </header>
     <div id="status" role="status">
-      Open your Paychex timecard tab, then refresh.
+      Enter your recorded hours and clock-in below.
     </div>
+    <section class="settings" id="manualSettings">
+      <label>Recorded paid time (hours)
+        <input id="manualHours" type="number" min="0" step="0.25" value="0" />
+      </label>
+    </section>
     <section class="settings">
       <label
         >Week starts
@@ -37,7 +45,7 @@
     </section>
     <section class="settings">
       <label
-        >Today clock-in (manual fallback)
+        >Today clock-in
         <input id="manualIn" type="time" /></label
       ><label
         ><input id="manualEnabled" type="checkbox" /> Use this clock-in to
@@ -54,7 +62,7 @@
     <p id="period"></p>
     <p id="detail"></p>
     <button id="refresh">Refresh from Paychex</button>
-    <p class="foot">
+    <p class="foot" id="foot">
       Read-only. The estimate is not an official payroll total. Keep Paychex
       open and signed in. This extension does not clock you in or out.
     </p>
