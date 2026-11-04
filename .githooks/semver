@@ -1,0 +1,558 @@
+#!/bin/sh
+# Manual installation, updates, uninstallation, synchronization, and recovery.
+set -eu
+# Update from the source repository's default branch, independently of origin.
+update_source=https://github.com/syulflores/git-semver-hooks.git
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+gitdir=$(git rev-parse --absolute-git-dir)
+state=$gitdir/semver-release
+
+# Recovery uses the dispatcher and hook definitions captured before any rebase.
+if test -f "$state/engine" && test "${SEMVER_ENGINE_ACTIVE:-}" != 1; then
+    SEMVER_ENGINE_ACTIVE=1 exec sh "$state/engine" "$@"
+fi
+definitions=$root/.githooks/post-commit
+test ! -f "$state/post-commit" || definitions=$state/post-commit
+# An older hook could execute automatic preparation when sourced. Require the
+# matching definitions-only guard before loading either hook copy.
+if ! grep -Fxq 'if test "${SEMVER_LOAD_FUNCTIONS:-}" = 1; then return 0; fi' "$definitions"; then
+    echo 'SemVer: copy the matching post-commit script before running git semver; this hook cannot load reusable functions safely.' >&2
+    exit 1
+fi
+SEMVER_LOAD_FUNCTIONS=1
+. "$definitions"
+unset SEMVER_LOAD_FUNCTIONS
+trap semver_unlock 0
+semver_init
+case "${1:-}" in ''|--help) ;; *) semver_lock "${1:-}" ;; esac
+
+usage() {
+    echo 'Usage: git semver [--install|--update|--uninstall|--sync|--continue|--abort|--help]'
+}
+
+# Migrate the old top-level env block without executing YAML as shell code.
+# Ambiguous YAML is left for manual migration rather than changing its meaning.
+migrate_release_config() {
+    awk '
+        function invalid() { exit 1 }
+        function shell_quote(value, result, i, c) {
+            result = quote
+            for (i = 1; i <= length(value); i++) {
+                c = substr(value, i, 1)
+                result = result (c == quote ? quote "\\" quote quote : c)
+            }
+            return result quote
+        }
+        BEGIN { quote = sprintf("%c", 39) }
+        { sub(/\r$/, "") }
+        /^env:/ {
+            if ($0 !~ /^env:[ \t]*(#.*)?$/) invalid()
+            in_env = 1; next
+        }
+        /^[^ \t#]/ { in_env = 0 }
+        in_env && /^[ \t]+<<:/ { invalid() }
+        in_env && /^[ \t]+(RELEASE_BRANCHES|TAG_PREFIX|RELEASE_TITLE_PREFIX|UPDATE_LATEST):/ {
+            key = $0; sub(/^[ \t]+/, "", key); sub(/:.*/, "", key)
+            if (seen[key]++) invalid()
+            value = $0; sub(/^[^:]*:[ \t]*/, "", value)
+            if (substr(value, 1, 1) == "\"") {
+                if (value !~ /^"[^"\\]*"[ \t]*(#.*)?$/) invalid()
+                sub(/^"/, "", value); sub(/"[ \t]*(#.*)?$/, "", value)
+            } else if (substr(value, 1, 1) == quote) {
+                pattern = "^" quote "([^" quote "]|" quote quote ")*" quote "[ \t]*(#.*)?$"
+                if (value !~ pattern) invalid()
+                sub("^" quote, "", value); sub(quote "[ \t]*(#.*)?$", "", value)
+                gsub(quote quote, quote, value)
+            } else {
+                sub(/[ \t]+#.*/, "", value); sub(/[ \t]+$/, "", value)
+                if (value !~ /^[A-Za-z0-9_.\/-]+$/ || value ~ /^(null|Null|NULL)$/) invalid()
+            }
+            # GitHub expressions need manual conversion to shell configuration.
+            if (index(value, "${{")) invalid()
+            print key "=" shell_quote(value)
+        }
+    ' "$1"
+}
+
+update() (
+    test "$#" -eq 1 || fail 'Unexpected update arguments.'
+    test ! -d "$state" || fail 'Finish or abort the active operation before updating.'
+    test ! -d "$gitdir/semantic-version-sync" && test ! -f "$gitdir/semantic-version-pending" ||
+        fail 'Finish recovery with the old hooks before updating.'
+    test ! -d "$gitdir/rebase-merge" && test ! -d "$gitdir/rebase-apply" &&
+        test ! -f "$gitdir/MERGE_HEAD" || fail 'Finish the active rebase or merge before updating.'
+
+    # Only the distributed implementation is replaced. Project configuration,
+    # attributes, version, changelog, README, and other workflows stay local.
+    update_files='.githooks/post-commit .githooks/pre-push .githooks/post-index-change .github/workflows/release.yml .githooks/semver'
+    for directory in .githooks .github .github/workflows; do
+        test ! -L "$directory" || fail "Cannot update through symbolic link $directory."
+    done
+    for file in $update_files .githooks/semver.conf .github/workflows/release.conf; do
+        test ! -L "$file" || fail "Cannot update symbolic link $file."
+        test ! -e "$file" || test -f "$file" || fail "Cannot update non-file $file."
+    done
+
+    update_tmp=$(mktemp -d "$gitdir/semver-update.XXXXXX")
+    update_backup=
+    update_applying=false
+    update_cleanup() {
+        result=$?
+        trap - 0
+        if test "$update_applying" = true; then
+            # Restore every replaced file if copying or chmod was interrupted.
+            for file in $changed_files; do
+                if test -f "$update_backup/$file"; then
+                    cp -p "$update_backup/$file" "$root/$file" || :
+                else
+                    rm -f "$root/$file"
+                fi
+            done
+            echo "SemVer: update failed; previous files are backed up in $update_backup." >&2
+        fi
+        rm -rf "$update_tmp"
+        exit "$result"
+    }
+    trap update_cleanup 0
+    trap 'exit 130' 1 2 15
+    git init --bare --quiet "$update_tmp/source"
+    # Suppress Git's diagnostics as they can contain the full source URL.
+    if ! GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never git -C "$update_tmp/source" \
+        -c credential.interactive=false fetch --quiet --depth=1 "$update_source" HEAD > /dev/null 2>&1; then
+        fail "can't find the source."
+    fi
+    changed_files=
+    for file in $update_files; do
+        mkdir -p "$update_tmp/files/$(dirname "$file")"
+        if ! git -C "$update_tmp/source" show "FETCH_HEAD:$file" > "$update_tmp/files/$file" 2>/dev/null; then
+            fail 'The source is missing required update files.'
+        fi
+        case "$file" in .githooks/*)
+            sh -n "$update_tmp/files/$file" || fail 'The source contains an invalid hook script.' ;;
+        esac
+        if ! test -f "$file" || ! cmp -s "$file" "$update_tmp/files/$file"; then
+            changed_files="$changed_files $file"
+        fi
+    done
+    grep -Fxq 'if test "${SEMVER_LOAD_FUNCTIONS:-}" = 1; then return 0; fi' \
+        "$update_tmp/files/.githooks/post-commit" || fail 'The source hooks are incompatible.'
+    # Existing project settings are never overwritten. On the first update,
+    # create the config from source defaults plus the old workflow env values.
+    if test ! -f .github/workflows/release.conf &&
+        grep -Fq '.github/workflows/release.conf' "$update_tmp/files/.github/workflows/release.yml"; then
+        git -C "$update_tmp/source" show FETCH_HEAD:.github/workflows/release.conf \
+            > "$update_tmp/files/.github/workflows/release.conf" 2>/dev/null ||
+            fail 'The source is missing .github/workflows/release.conf.'
+        sh -n "$update_tmp/files/.github/workflows/release.conf" || fail 'The source contains invalid release configuration.'
+        if test -f .github/workflows/release.yml; then
+            migrate_release_config .github/workflows/release.yml > "$update_tmp/release-overrides" ||
+                fail 'Cannot migrate workflow settings automatically; create .github/workflows/release.conf with your settings before updating.'
+            # Replace defaults in place so each setting has one editable value.
+            awk '
+                FILENAME == ARGV[1] { key = $0; sub(/=.*/, "", key); overrides[key] = $0; next }
+                { key = $0; sub(/=.*/, "", key)
+                  if (key in overrides) print overrides[key]; else print }
+            ' "$update_tmp/release-overrides" "$update_tmp/files/.github/workflows/release.conf" > "$update_tmp/release-config"
+            mv "$update_tmp/release-config" "$update_tmp/files/.github/workflows/release.conf"
+        fi
+        # Install the config before the workflow and dispatcher; rollback covers it.
+        changed_files=".github/workflows/release.conf $changed_files"
+    fi
+    # Read assignments as text, never by sourcing downloaded configuration.
+    # Insert missing defaults beside their neighbors in the source template.
+    for file in .githooks/semver.conf .github/workflows/release.conf; do
+        defaults=$update_tmp/defaults
+        git -C "$update_tmp/source" show "FETCH_HEAD:$file" > "$defaults" 2>/dev/null ||
+            fail "The source is missing $file."
+        sh -n "$defaults" || fail "The source contains invalid configuration: $file."
+        mkdir -p "$update_tmp/files/$(dirname "$file")"
+        candidate=$update_tmp/files/$file
+        # The migration above has already prepared a missing release.conf.
+        if test -f "$file"; then
+            cp -p "$file" "$candidate"
+        elif test ! -f "$candidate"; then
+            cp "$defaults" "$candidate"
+        fi
+        terminated=true
+        if test -s "$candidate" && test -n "$(tail -c 1 "$candidate")"; then
+            terminated=false
+        fi
+        awk -v BINMODE=3 -v terminated="$terminated" '
+            function key(line) {
+                sub(/^[ \t]*(export[ \t]+)?/, "", line)
+                if (line !~ /^[A-Za-z_][A-Za-z0-9_]*=/) return ""
+                sub(/=.*/, "", line); return line
+            }
+            FILENAME == ARGV[1] {
+                lines[++count] = $0
+                name = key($0); if (name != "" && !(name in present)) present[name] = count
+                if (FNR == 1 && /\r$/) cr = "\r"
+                next
+            }
+            {
+                sub(/\r$/, "")
+                name = key($0)
+                if (name != "") {
+                    names[++options] = name
+                    defaults[options] = $0
+                }
+            }
+            END {
+                # Prefer the next existing option, then the previous one.
+                # Keep leading comments with the next option and trailing comments at the end.
+                for (i = 1; i <= options; i++) {
+                    name = names[i]
+                    if (name in present) { previous = present[name]; continue }
+                    if (added[name]++) continue
+                    position = previous ? previous + 1 : count + 1
+                    for (j = i + 1; j <= options; j++) {
+                        if (names[j] in present) {
+                            position = present[names[j]]
+                            while (position > 1 && lines[position - 1] ~ /^[ \t]*#/) position--
+                            break
+                        }
+                    }
+                    insert[position] = insert[position] defaults[i] cr "\n"
+                }
+                for (i = 1; i <= count + 1; i++) {
+                    printf "%s", insert[i]
+                    if (i <= count) {
+                        printf "%s", lines[i]
+                        if (i < count || terminated == "true" || insert[count + 1] != "") printf "\n"
+                    }
+                }
+            }
+        ' "$candidate" "$defaults" > "$update_tmp/merged-config"
+        # Validate the complete candidate so multiline defaults fail safely.
+        sh -n "$update_tmp/merged-config" || fail "Cannot insert defaults from $file automatically."
+        mv "$update_tmp/merged-config" "$candidate"
+        if ! test -f "$file" || ! cmp -s "$file" "$candidate"; then
+            case " $changed_files " in
+                *" $file "*) ;;
+                *) changed_files="$file $changed_files" ;;
+            esac
+        fi
+    done
+    if test -z "$changed_files"; then
+        echo 'SemVer: updated to the most recent version.'
+        exit 0
+    fi
+
+    update_backup=$(mktemp -d "$gitdir/semver-update-backup.XXXXXX")
+    for file in $changed_files; do
+        mkdir -p "$update_backup/$(dirname "$file")"
+        test ! -f "$file" || cp -p "$file" "$update_backup/$file"
+    done
+    update_applying=true
+    # Replace the dispatcher last, after downloading and validating everything.
+    for file in $changed_files; do
+        mkdir -p "$(dirname "$file")"
+        cp "$update_tmp/files/$file" "$file"
+        case "$file" in .githooks/*.conf) ;; .githooks/*) chmod +x "$file" ;; esac
+    done
+    update_applying=false
+    echo 'SemVer: updated to the most recent version. Review and commit the updated files.'
+    echo "SemVer: previous files backed up in $update_backup."
+)
+
+# Configuration belongs to the common Git directory, including in worktrees.
+install_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)/semver-install
+install_keys='alias.semver core.hooksPath semver.enabled push.followTags'
+installed_alias='!f() { p=$(git rev-parse --git-path semver-release/engine) || return; test -f "$p" || p=.githooks/semver; sh "$p" "$@"; }; f'
+
+is_semver_alias() {
+    # Compare known bootstrap commands without shell quoting or whitespace.
+    # Never evaluate an existing alias while checking it.
+    normalized_alias=$(printf '%s' "$1" | tr -d '[:space:]\042\047\134')
+    case "$normalized_alias" in
+        '!sh.githooks/semver'|'!f(){iftest-f.githooks/semver;thensh.githooks/semver$@;fi;};f'|*semver-release/engine*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+installed_value() {
+    case "$1" in
+        alias.semver) printf '%s\n' "$installed_alias" ;;
+        core.hooksPath) echo .githooks ;;
+        *) echo true ;;
+    esac
+}
+
+unset_local() {
+    if git config --local --unset-all "$1"; then :
+    else test "$?" -eq 5 || fail "Cannot remove local setting $1."; fi
+}
+
+save_install_config() {
+    # Reinstallation must retain the original baseline. NUL records preserve
+    # empty, multiline, and repeated values without evaluating configuration.
+    if test -d "$install_dir"; then
+        test -f "$install_dir/complete" || fail 'Installation backup is incomplete; inspect it before reinstalling.'
+        return 0
+    fi
+    mkdir "$install_dir"
+    for key in $install_keys; do
+        if git config --local --null --get-all "$key" > "$install_dir/$key"; then :
+        else test "$?" -eq 1 || fail "Cannot save local setting $key."; fi
+    done
+    # The documented bootstrap alias is part of setup, not a previous command.
+    if is_semver_alias "$(git config --local --get-all alias.semver || :)"; then
+        : > "$install_dir/alias.semver"
+    fi
+    : > "$install_dir/complete"
+}
+
+uninstall() {
+    test "$#" -eq 1 || fail 'Unexpected uninstall arguments.'
+    test ! -d "$state" || fail 'Finish or abort the active operation before uninstalling.'
+    test ! -d "$gitdir/semantic-version-sync" && test ! -f "$gitdir/semantic-version-pending" ||
+        fail 'Finish recovery with the old hooks before uninstalling.'
+    if test -d "$install_dir"; then
+        test -f "$install_dir/complete" || fail 'Installation backup is incomplete; inspect it before uninstalling.'
+        for key in $install_keys; do
+            test -f "$install_dir/$key" || fail "Missing installation backup for $key."
+        done
+    else
+        echo 'SemVer: no installation backup; removing recognized local settings only.'
+    fi
+    for key in $install_keys; do
+        current=$(git config --local --get-all "$key" || :)
+        expected=$(installed_value "$key")
+        # Leave settings edited since installation alone.
+        if test "$current" != "$expected"; then
+            if test -n "$current"; then echo "SemVer: keeping changed local setting $key."; fi
+            continue
+        fi
+        unset_local "$key"
+        if test -s "$install_dir/$key"; then
+            xargs -0 -n 1 git config --local --add "$key" < "$install_dir/$key"
+        fi
+    done
+    # A global/conditional hooksPath can otherwise re-enable these same hooks.
+    if test "$(git config --get core.hooksPath || :)" = .githooks; then
+        git config --local core.hooksPath /dev/null
+        echo 'SemVer: inherited .githooks path disabled with a local null-device hooksPath.'
+    fi
+    if test -d "$install_dir"; then
+        for key in $install_keys; do rm -f "$install_dir/$key"; done
+        rm -f "$install_dir/complete"
+        rmdir "$install_dir"
+    fi
+    echo 'SemVer hooks uninstalled for this clone. Files, commits, tags, and release records are retained.'
+}
+
+load_transaction() {
+    IFS= read -r branch < "$state/branch"
+    IFS= read -r remote < "$state/remote"
+    IFS= read -r destination < "$state/destination"
+    IFS= read -r fetch_url < "$state/fetch-url"
+}
+
+clean_history() {
+    clean_tip=$base
+    for original in $(git rev-list --reverse "$base..HEAD"); do
+        mapped=$(git rev-parse --verify "refs/semver/clean/$original" 2>/dev/null || :)
+        if test -n "$mapped"; then
+            tree=$(git rev-parse "$mapped^{tree}")
+        else
+            tree=$(git rev-parse "$original^{tree}")
+            parent=$(git rev-parse "$original^")
+            mapped_parent=$(git rev-parse --verify "refs/semver/clean/$parent" 2>/dev/null || :)
+            if test "$parent" != "$base" && test -n "$mapped_parent"; then
+                preserve_version=false
+                preserve_changelog=false
+                old_value=$(git show "$parent:$version_file" | version)
+                new_value=$(git show "$original:$version_file" | version)
+                test "$old_value" = "$new_value" || preserve_version=true
+                git diff --quiet "$parent" "$original" -- "$changelog_file" || preserve_changelog=true
+                tree=$(strip_tree "$original" "$mapped_parent")
+            fi
+        fi
+        clean_tip=$(copy_commit "$original" "$tree" "$clean_tip")
+    done
+}
+
+finish_rebase() {
+    original=$(cat "$state/original")
+    test "$(git rev-parse "refs/heads/$branch")" = "$original" || fail 'Original branch moved during synchronization.'
+    git update-ref "refs/heads/$branch" HEAD "$original"
+    git -c core.hooksPath=/dev/null checkout --quiet "$branch"
+    phase sync
+    remote_integrated=true
+}
+
+conflicts_staged() {
+    test -z "$(git ls-files --unmerged)" && git diff --quiet
+}
+
+resume_rebase() {
+    while test -d "$gitdir/rebase-merge" || test -d "$gitdir/rebase-apply"; do
+        test -n "$(git ls-files --unmerged)" || return 1
+        echo 'SemVer: synchronization paused. Resolve conflicts and stage the resolved files.' >&2
+        echo 'SemVer: use git semver --continue to resume manually, or git semver --abort to cancel.' >&2
+        if test "$auto_continue" = true; then
+            echo 'SemVer: synchronization will continue automatically when all conflicts are staged.' >&2
+        fi
+        # Open only an explicitly configured tool, on an interactive terminal.
+        if test -t 0 && { git config --get merge.tool >/dev/null || git config --get merge.guitool >/dev/null; }; then
+            if git config --get merge.tool >/dev/null; then
+                git -c core.hooksPath=/dev/null -c mergetool.keepBackup=false mergetool --no-prompt || :
+            else
+                git -c core.hooksPath=/dev/null -c mergetool.keepBackup=false mergetool --gui --no-prompt || :
+            fi
+        fi
+        test "$auto_continue" = true && conflicts_staged || return 1
+        echo 'SemVer: all conflicts staged; continuing automatically.'
+        if GIT_EDITOR=true git -c core.hooksPath=/dev/null rebase --continue; then return 0; fi
+        # Repeat only for another conflict, not an empty commit or other error.
+        test -n "$(git ls-files --unmerged)" || return 1
+    done
+    return 1
+}
+
+sync_history() {
+    phase sync
+    fetch_remote
+    test -n "$target" || return 0
+    if test "$remote_integrated" = true; then return 0; fi
+    if git merge-base --is-ancestor HEAD "$target"; then
+        git -c core.hooksPath=/dev/null merge --ff-only "$target"
+        remote_integrated=true
+        return
+    fi
+    base=$(git merge-base HEAD "$target") || fail 'Cannot synchronize unrelated histories.'
+    test -z "$(git rev-list --merges "$base..HEAD")" || fail 'Unpublished merge commits require manual synchronization.'
+    for commit in $(git rev-list "$base..HEAD"); do assert_unpublished "$commit"; done
+    # Rebase code, without replaying provisional release metadata.
+    clean_history
+    git rev-parse HEAD > "$state/original"
+    printf '%s\n' "$clean_tip" > "$state/clean-tip"
+    git -c core.hooksPath=/dev/null checkout --quiet --detach "$clean_tip"
+    phase rebase
+    if ! git -c core.hooksPath=/dev/null -c rebase.updateRefs=false -c rebase.autoSquash=false rebase --onto "$target" "$base"; then
+        resume_rebase || exit 1
+    fi
+    finish_rebase
+}
+
+rollback_release() {
+    rolled_back=false
+    if test -f "$state/after-amend"; then
+        test "$(git rev-parse HEAD)" = "$(cat "$state/after-amend")" || fail 'HEAD changed after preparation; investigate before recovery.'
+        clean
+        assert_unpublished "$(cat "$state/after-amend")"
+        if test -f "$state/tag-oid"; then
+            git update-ref -d "refs/tags/$(cat "$state/tag")" "$(cat "$state/tag-oid")"
+        elif test -f "$state/tag" && git show-ref --verify --quiet "refs/tags/$(cat "$state/tag")"; then
+            fail 'Tag creation was interrupted; inspect the tag before recovery.'
+        fi
+        git -c core.hooksPath=/dev/null reset --hard "$(cat "$state/before-amend")" --quiet
+        rolled_back=true
+    elif test -f "$state/before-amend"; then
+        test "$(git rev-parse HEAD)" = "$(cat "$state/before-amend")" || fail 'Amend was interrupted; inspect HEAD before recovery.'
+    fi
+    if test "$rolled_back" = true; then restore_draft; fi
+    rm -f "$state/before-amend" "$state/after-amend" "$state/tag" "$state/tag-oid" "$state/index"
+}
+
+restore_draft() {
+    rm -rf "$draft"
+    if test -d "$state/draft-before"; then
+        cp -R "$state/draft-before" "$draft"
+        tag=$(cat "$draft/tag")
+        oid=$(cat "$draft/tag-oid")
+        current_oid=$(git rev-parse --verify "refs/tags/$tag" 2>/dev/null || :)
+        test -z "$current_oid" || test "$current_oid" = "$oid" || fail 'Draft tag changed outside recovery.'
+        git update-ref "refs/tags/$tag" "$oid" "$current_oid"
+    fi
+}
+
+start() {
+    branch=$(git symbolic-ref --quiet --short HEAD) || fail 'Check out a branch first.'
+    begin_transaction
+    sync_history
+    finalize_release
+}
+
+continue_operation() {
+    test -d "$state" || fail 'No operation is active.'
+    load_transaction
+    if test -d "$gitdir/rebase-merge" || test -d "$gitdir/rebase-apply"; then
+        if ! GIT_EDITOR=true git -c core.hooksPath=/dev/null rebase --continue; then
+            resume_rebase || fail 'Synchronization is still paused. Resolve and stage remaining conflicts; git semver --continue is available for manual recovery.'
+        fi
+    fi
+    if test -f "$state/clean-tip" && test -z "$(git symbolic-ref --quiet --short HEAD || :)"; then finish_rebase; fi
+    test "$(git symbolic-ref --quiet --short HEAD)" = "$branch" || fail 'Return to the original branch before continuing.'
+    rollback_release
+    clean
+    sync_history
+    finalize_release
+}
+
+case "${1:-}" in
+    ''|--help) usage ;;
+    --install)
+        test "$#" -eq 1 || fail 'Unexpected install arguments.'
+        test ! -d "$state" || fail 'Finish or abort the active operation first.'
+        test ! -d "$gitdir/semantic-version-sync" && test ! -f "$gitdir/semantic-version-pending" || fail 'Finish recovery with the old hooks before migrating.'
+        # The post-commit definitions guard was checked before sourcing it.
+        for old_hook in .githooks/post-index-change; do
+            if test -f "$old_hook" && grep -Eq 'semantic-version|SEMVER_POST_COMMIT_LIBRARY' "$old_hook"; then
+                fail "Remove the old versioning hook $old_hook before installing; preserve any unrelated hook actions."
+            fi
+        done
+        existing=$(git config --get alias.semver || :)
+        if test -n "$existing" && ! is_semver_alias "$existing"; then
+            fail 'An unrelated semver alias already exists.'
+        fi
+        if test -z "$existing" && git --list-cmds=main,others | grep -Fxq semver; then fail 'A git-semver command already exists.'; fi
+        hooks=$(git config --get core.hooksPath || :)
+        case "$hooks" in ''|.githooks|/dev/null|nul) ;; *) fail 'An existing hooksPath needs to be integrated manually.' ;; esac
+        save_install_config
+        git config --local --replace-all alias.semver "$installed_alias"
+        git config --local --replace-all core.hooksPath .githooks
+        git config --local --replace-all semver.enabled true
+        git config --local --replace-all push.followTags true
+        chmod +x .githooks/pre-push .githooks/post-commit .githooks/post-index-change
+        echo 'SemVer hooks enabled for this clone. Commit and push normally.'
+        ;;
+    # The dispatcher may have replaced itself; do not read from it again.
+    --update) update "$@"; exit ;;
+    --uninstall) uninstall "$@" ;;
+    --sync)
+        test "$#" -eq 1 || fail 'Unexpected sync arguments.'
+        if test -d "$state"; then continue_operation
+        else start; fi
+        ;;
+    --auto-continue)
+        test "$#" -eq 1 || fail 'Unexpected auto-continue arguments.'
+        test "$auto_continue" = true || exit 0
+        test -f "$state/phase" && test "$(cat "$state/phase")" = rebase || exit 0
+        test -d "$gitdir/rebase-merge" || test -d "$gitdir/rebase-apply" || exit 0
+        test ! -e "$gitdir/index.lock" || exit 0
+        conflicts_staged || exit 0
+        echo 'SemVer: all conflicts staged; continuing automatically.'
+        continue_operation
+        ;;
+    --continue) test "$#" -eq 1 || fail 'Unexpected continue arguments.'; continue_operation ;;
+    --abort)
+        test "$#" -eq 1 || fail 'Unexpected abort arguments.'
+        test -d "$state" || fail 'No operation is active.'
+        load_transaction
+        if test -d "$gitdir/rebase-merge" || test -d "$gitdir/rebase-apply"; then
+            git -c core.hooksPath=/dev/null rebase --abort
+            git -c core.hooksPath=/dev/null checkout --quiet "$branch"
+        else
+            rollback_release
+            if test -f "$state/clean-tip" && test -z "$(git symbolic-ref --quiet --short HEAD || :)"; then
+                git -c core.hooksPath=/dev/null checkout --quiet "$branch"
+            fi
+        fi
+        restore_draft
+        finish
+        echo 'SemVer: operation aborted. Completed synchronization is retained.'
+        ;;
+    *) usage >&2; exit 1 ;;
+esac

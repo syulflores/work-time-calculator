@@ -1,0 +1,15 @@
+#!/bin/sh
+# Resume this tool's paused rebase when a resolver stages the final conflict.
+set -eu
+test "${SEMVER_ENGINE_ACTIVE:-}" != 1 || exit 0
+test -z "${GIT_INDEX_FILE:-}" || exit 0
+# Hooks run at the repository root. Avoid starting Git on the idle path;
+# linked worktrees use a .git file and need discovery instead.
+gitdir=${GIT_DIR:-.git}
+test -d "$gitdir" || gitdir=$(git rev-parse --absolute-git-dir)
+state=$gitdir/semver-release
+test -f "$state/engine" && test -f "$state/phase" || exit 0
+IFS= read -r phase < "$state/phase"
+test "$phase" = rebase || exit 0
+test ! -d "$gitdir/semver-command-lock" || exit 0
+sh "$state/engine" --auto-continue

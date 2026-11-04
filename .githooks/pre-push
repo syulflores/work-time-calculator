@@ -1,0 +1,103 @@
+#!/bin/sh
+# Validate the refs Git already advertised; no fetch, ls-remote, or nested push.
+set -eu
+. .githooks/semver.conf
+gitdir=$(git rev-parse --absolute-git-dir)
+fail() { echo "SemVer: $*" >&2; exit 1; }
+version_tag() {
+    number=${1#"$tag_prefix"}
+    printf '%s\n' "$number" | awk '/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ {ok=1} END {exit !ok}'
+}
+updates=$(cat)
+protected=false
+branch_updates=false
+tag_selected=false
+draft=$gitdir/semver-draft
+tag=
+tag_oid=
+if test -f "$draft/head"; then
+    IFS= read -r draft_head < "$draft/head"
+    IFS= read -r tag < "$draft/tag"
+    IFS= read -r tag_oid < "$draft/tag-oid"
+fi
+while read -r local_ref local_oid remote_ref remote_oid; do
+    case "$local_oid" in ''|*[!0]*) ;; *) continue ;; esac
+    case "$remote_ref" in
+        refs/heads/*)
+            branch=${remote_ref#refs/heads/}
+            if test -n "$allowed_branches"; then
+                case " $allowed_branches " in *" $branch "*) ;; *) continue ;; esac
+            fi
+            protected=true; branch_updates=true
+            ;;
+        refs/tags/"$tag_prefix"*)
+            version_tag "${remote_ref#refs/tags/}" || continue
+            protected=true
+            test "$remote_ref" = "refs/tags/$tag" && test "$local_oid" = "$tag_oid" ||
+                fail 'Only the prepared release tag may be published. Run git semver --sync.'
+            case "$remote_oid" in *[!0]*)
+                test "$remote_oid" = "$local_oid" || fail 'Release tag already exists remotely. Run git semver --sync.' ;;
+            esac
+            tag_selected=true
+            ;;
+    esac
+done <<EOF
+$updates
+EOF
+if test "$protected" != true; then
+    # Git can omit both a rejected branch and an already-used tag. A completed
+    # push updates the local upstream; an unpublished draft still needs sync.
+    if test -z "$updates" && test -f "$gitdir/semver-ready"; then
+        {
+            IFS= read -r head
+            IFS= read -r branch
+            IFS= read -r remote
+        } < "$gitdir/semver-ready"
+        if test "$remote" = "$1"; then
+            upstream=$(git rev-parse --verify "$branch@{upstream}" 2>/dev/null || :)
+            test "$upstream" = "$head" || fail 'Remote no longer accepts the prepared release. Run git semver --sync.'
+        fi
+    fi
+    exit 0
+fi
+test -f "$gitdir/semver-ready" || fail 'Commit was not finalized. Run git semver --sync.'
+{
+    IFS= read -r head
+    IFS= read -r branch
+    IFS= read -r remote
+    IFS= read -r destination
+    IFS= read -r url
+    IFS= read -r target
+    IFS= read -r integrated
+} < "$gitdir/semver-ready"
+test "$remote" = "$1" && test "$url" = "$2" || fail 'Push destination differs from commit preparation. Run git semver --sync.'
+# Git omits non-fast-forward branches from this input. Never publish their tag
+# alone unless --sync has fetched and confirmed a partially published release.
+if test "$branch_updates" != true; then
+    test -f "$draft/published" || fail 'Branch is not being published with its release tag. Run git semver --sync.'
+    IFS= read -r published < "$draft/published"
+    test "$published" = "$draft_head" || fail 'Release publication is unconfirmed. Run git semver --sync.'
+    exit 0
+fi
+test ! -f "$gitdir/semver-pending" || fail 'Release preparation is incomplete. Run git semver --sync.'
+test ! -d "$gitdir/semver-release" || fail 'Synchronization is active. Use git semver --continue or --abort.'
+test "$integrated" = true || fail 'Remote code history needs synchronization. Run git semver --sync, then git push.'
+if test -n "$tag" && test "$draft_head" = "$head"; then
+    test "$tag_selected" = true || fail 'Prepared tag missing or already used remotely. Run git semver --sync; ensure push.followTags is enabled.'
+fi
+while read -r local_ref local_oid remote_ref remote_oid; do
+    case "$local_oid" in ''|*[!0]*) ;; *) continue ;; esac
+    case "$remote_ref" in
+        refs/heads/*)
+            name=${remote_ref#refs/heads/}
+            if test -n "$allowed_branches"; then
+                case " $allowed_branches " in *" $name "*) ;; *) continue ;; esac
+            fi
+            test "$local_oid" = "$head" && test "$remote_ref" = "$destination" || fail 'Push only the prepared release branch. Run git semver --sync.'
+            case "$remote_oid" in *[!0]*) ;; *) remote_oid= ;; esac
+            test "$remote_oid" = "$target" || fail 'Remote changed since commit preparation. Run git semver --sync, then git push.'
+            ;;
+    esac
+done <<EOF
+$updates
+EOF

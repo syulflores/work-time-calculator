@@ -1,0 +1,90 @@
+name: Publish version releases
+
+# Publishing settings are loaded from .github/workflows/release.conf after checkout.
+# Trigger filters cannot use that file; the script checks branches and tag prefixes.
+on:
+  push:
+    branches: ['**']
+    tags: ['**'] # Accept any prefix, including none; only version tags become releases.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Each run reconciles all tags, including when several commits are pushed together.
+concurrency:
+  group: version-releases
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish missing versions and select Latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Defaults also support older tagged commits without a config file.
+          RELEASE_BRANCHES=main
+          TAG_PREFIX=v
+          RELEASE_TITLE_PREFIX=''
+          UPDATE_LATEST=true
+          if [[ -f .github/workflows/release.conf ]]; then
+            source .github/workflows/release.conf
+          fi
+          # Tag pushes and manual runs bypass the branch allowlist.
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/* && -n "$RELEASE_BRANCHES" ]]; then
+            branch_allowed=false
+            read -r -a release_branches <<< "$RELEASE_BRANCHES"
+            for branch in "${release_branches[@]}"; do
+              if [[ "$GITHUB_REF_NAME" == "$branch" ]]; then
+                branch_allowed=true
+                break
+              fi
+            done
+            if [[ "$branch_allowed" == false ]]; then
+              echo "Skipping release publishing for branch: $GITHUB_REF_NAME"
+              exit 0
+            fi
+          fi
+          pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          case "$UPDATE_LATEST" in
+            true|false) ;;
+            *) echo 'UPDATE_LATEST must be "true" or "false".' >&2; exit 1 ;;
+          esac
+          is_version_tag() {
+            [[ "$1" == "$TAG_PREFIX"* && "${1#"$TAG_PREFIX"}" =~ $pattern ]]
+          }
+          existing=$(mktemp)
+          notes=$(mktemp)
+          trap 'rm -f "$existing" "$notes"' EXIT
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' > "$existing"
+
+          # New release tags contain the complete grouped release notes.
+          while IFS= read -r tag; do
+            is_version_tag "$tag" || continue
+            if ! grep -Fxq "$tag" "$existing"; then
+              git for-each-ref --format='%(contents)' "refs/tags/$tag" > "$notes"
+              gh release create "$tag" --verify-tag --title "${RELEASE_TITLE_PREFIX}${tag}" --notes-file "$notes" --latest=false
+            fi
+          done < <(git tag --list --sort=version:refname)
+
+          # Highest published stable version wins, even when an older tag arrives later.
+          if [[ "$UPDATE_LATEST" == false ]]; then
+            exit 0
+          fi
+          latest=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | { while IFS= read -r tag; do
+                  if is_version_tag "$tag"; then printf '%s\n' "$tag"; fi
+                done; } | sort -V | tail -n 1)
+          if [[ -n "$latest" ]]; then
+            gh release edit "$latest" --latest
+          fi

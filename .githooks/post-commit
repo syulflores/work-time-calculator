@@ -1,0 +1,685 @@
+#!/bin/sh
+# Shared release functions and automatic commit preparation.
+
+fail() { echo "SemVer: $*" >&2; exit 1; }
+
+semver_init() {
+    state=$gitdir/semver-release
+    draft=$gitdir/semver-draft
+    pending=$gitdir/semver-pending
+    config=$root/.githooks/semver.conf
+    test ! -f "$state/config" || config=$state/config
+    test -f "$config" || fail 'Missing .githooks/semver.conf.'
+    . "$config"
+    auto_continue=${auto_continue-true}
+    case "$auto_continue" in true|false) ;; *) fail 'auto_continue must be true or false.' ;; esac
+    commit_version=${commit_version-false}
+    case "$commit_version" in true|false) ;; *) fail 'commit_version must be true or false.' ;; esac
+    changelog_exact_commit_message=${changelog_exact_commit_message-false}
+    case "$changelog_exact_commit_message" in true|false) ;; *) fail 'changelog_exact_commit_message must be true or false.' ;; esac
+    changelog_remove_extra_headings=${changelog_remove_extra_headings-true}
+    case "$changelog_remove_extra_headings" in true|false) ;; *) fail 'changelog_remove_extra_headings must be true or false.' ;; esac
+    # Internal index reads/writes and merge tools are handled by this running engine.
+    export SEMVER_ENGINE_ACTIVE=1
+    test "$version_file" != "$changelog_file" || fail 'Version and changelog paths must differ.'
+    for path in "$version_file" "$changelog_file"; do
+        case "$path" in ''|/*|../*|*/../*|*/..|.git|.git/*|*\\*|[A-Za-z]:*) fail 'Managed paths must stay inside the repository, outside .git.' ;; esac
+    done
+    case "$version_field" in *[!a-zA-Z0-9_-]*) fail 'Use a simple JSON field name.' ;; esac
+}
+
+semver_lock() {
+    lock=$gitdir/semver-command-lock
+    if ! mkdir "$lock" 2>/dev/null; then
+        test "${1:-}" != --auto-continue || exit 0
+        fail 'Another SemVer command is running (or a crashed command left .git/semver-command-lock).'
+    fi
+    semver_lock_owned=true
+    trap 'exit 130' 1 2 15
+}
+semver_unlock() {
+    test "${semver_lock_owned:-false}" = true || return 0
+    test ! -f "$lock/git-config" || rm -f "$lock/git-config" "$lock/tracking"
+    rmdir "$lock"
+    semver_lock_owned=false
+}
+
+clean() { test -z "$(git -c core.hooksPath=/dev/null status --porcelain)" || fail 'Commit or stash all working changes, including untracked files, first.'; }
+
+enabled_branch() {
+    test -z "$allowed_branches" && return 0
+    case " $allowed_branches " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+warn_manual_metadata() {
+    echo 'SemVer: warning: version and changelog updates are normally automatic; keeping your manual edits for this unpublished release.' >&2
+}
+
+load_tracking() {
+    # Read effective configuration once, including includes and command-line
+    # overrides. NUL records keep spaces and empty values unambiguous.
+    if git config --null --get-regexp '^(branch\..*\.(remote|merge|pushremote)|remote\..*\.(push|mirror)|remote\.pushdefault)$' > "$lock/git-config"; then :
+    else test "$?" -eq 1 || fail 'Cannot read tracking configuration.'; fi
+    awk -v branch="$branch" '
+        BEGIN {RS="\0"}
+        {
+            pos=index($0, "\n"); key=substr($0,1,pos-1); value=substr($0,pos+1)
+            values[key]=value; present[key]=1
+            if(key ~ /^remote\..*\.push$/ && value!="") pushes[key]=1
+        }
+        END {
+            prefix="branch." branch
+            remote=present[prefix ".remote"] ? values[prefix ".remote"] : "origin"
+            destination=present[prefix ".merge"] ? values[prefix ".merge"] : "refs/heads/" branch
+            pushremote=present[prefix ".pushremote"] ? values[prefix ".pushremote"] :
+                (present["remote.pushdefault"] ? values["remote.pushdefault"] : remote)
+            mirror=values["remote." remote ".mirror"]
+            if(index(remote destination pushremote mirror, "\n")) exit 1
+            print remote; print destination; print pushremote; print mirror
+            print pushes["remote." remote ".push"] ? "true" : "false"
+            print present[prefix ".remote"] ? "true" : "false"
+        }
+    ' "$lock/git-config" > "$lock/tracking" || fail 'Invalid multiline tracking configuration.'
+    {
+        IFS= read -r remote
+        IFS= read -r destination
+        IFS= read -r pushremote
+        IFS= read -r mirror
+        IFS= read -r custom_push
+        IFS= read -r has_upstream
+    } < "$lock/tracking"
+}
+
+version() {
+    if test -z "$version_field"; then
+        if test "$#" -eq 0; then tr -d '\r\n'; else printf '%s\n' "$1"; fi
+    else
+        awk -v field="$version_field" -v replacement="${1:-}" '
+            {sub(/\r$/, "")}
+            $0 ~ "^[[:space:]]*\"" field "\"[[:space:]]*:" {
+                value=$0; sub(/^[^:]*:[[:space:]]*"/, "", value)
+                sub(/"[[:space:]]*,?[[:space:]]*$/, "", value); count++
+                if (replacement) sub(/:[[:space:]]*"[^"]*"/, ": \"" replacement "\"")
+            }
+            replacement {print}
+            END {if(count!=1) exit 1; if(!replacement) print value}
+        '
+    fi
+}
+
+next_version() {
+    printf '%s\n' "$1" | awk -F. -v bump="$2" '
+        NF!=3 || $0 !~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ {exit 1}
+        {a=$1+0; b=$2+0; c=$3+0
+         if(bump=="major") {a++; b=0; c=0}
+         else if(bump=="minor") {b++; c=0}
+         else if(bump=="patch") c++
+         printf "%.0f.%.0f.%.0f\n", a,b,c}
+    '
+}
+
+message_label() (
+    # Only remove labels proven to have been generated by this clone. The clean
+    # reference retains the original subject, even after configuration changes.
+    labeled=$1
+    clean_commit=$(git rev-parse --verify "refs/semver/clean/$labeled" 2>/dev/null || :)
+    if test -z "$clean_commit" && test "${draft_active:-false}" = true &&
+        test "$(git rev-parse "$labeled^")" = "$(git rev-parse "$draft_head^")"; then
+        labeled=$draft_head
+        clean_commit=$(git rev-parse --verify "refs/semver/clean/$labeled" 2>/dev/null || :)
+    fi
+    test -n "$clean_commit" || exit 0
+    clean_subject=$(git log -1 --format=%B "$clean_commit" | sed -n '1p')
+    labeled_subject=$(git log -1 --format=%B "$labeled" | sed -n '1p')
+    label=$(SEMVER_CLEAN_SUBJECT=$clean_subject SEMVER_LABELED_SUBJECT=$labeled_subject awk '
+        BEGIN {
+            clean=ENVIRON["SEMVER_CLEAN_SUBJECT"]; labeled=ENVIRON["SEMVER_LABELED_SUBJECT"]
+            match(clean,/^[a-zA-Z]+(\([^()]+\))?!?:[[:space:]]*/); pos=RLENGTH
+            extra=length(labeled)-length(clean)
+            if(extra>0 && substr(labeled,1,pos)==substr(clean,1,pos) &&
+                substr(labeled,pos+extra+1)==substr(clean,pos+1))
+                printf "%s", substr(labeled,pos+1,extra)
+        }
+    ')
+    if test -n "$label"; then printf '%s' "$label"; exit 0; fi
+    # Retain cleanup support for drafts made with the former trailing label.
+    case "$labeled_subject" in
+        "$clean_subject"*) printf '%s' "${labeled_subject#"$clean_subject"}" ;;
+    esac
+)
+
+commit_message() {
+    label=$(message_label "$1")
+    git cat-file commit "$1" | SEMVER_MESSAGE_LABEL=$label awk '
+        !body {if($0=="") body=1; next}
+        !subject {
+            subject=1
+            label=ENVIRON["SEMVER_MESSAGE_LABEL"]
+            match($0,/^[a-zA-Z]+(\([^()]+\))?!?:[[:space:]]*/); pos=RLENGTH
+            if(label!="" && substr($0,pos+1,length(label))==label)
+                $0=substr($0,1,pos) substr($0,pos+length(label)+1)
+            else if(label!="" && substr($0,length($0)-length(label)+1)==label)
+                $0=substr($0,1,length($0)-length(label))
+        }
+        {print}
+    '
+}
+
+release_messages() {
+    # Read original subjects in one batch, keeping generated draft labels out
+    # of notes without starting Git for every unpublished commit.
+    git for-each-ref --format='%(refname:strip=3)%09%(contents:subject)' refs/semver/clean > "$state/message-subjects"
+    head_label=
+    if test "${draft_active:-false}" = true; then head_label=$(message_label "$release_head"); fi
+    git log --reverse --no-merges -z --format='%H%x00%B%x00%s' "$range" > "$state/messages"
+    SEMVER_EXACT_MESSAGE=${1:-false} SEMVER_COMMIT_VERSION=$commit_version SEMVER_RELEASE_TAG=${release_tag:-} \
+    SEMVER_HEAD_LABEL=$head_label awk -v head="$release_head" -v patches="$patch_types" -v minors="$minor_types" -v dir="$state" '
+        BEGIN {
+            while((getline entry < (dir "/message-subjects"))>0) {
+                tab=index(entry,"\t"); subjects[substr(entry,1,tab-1)]=substr(entry,tab+1)
+            }
+            RS="\0"
+        }
+        NR%3==1 {
+            current=($0==head)
+            subject=subjects[$0]
+            label=($0==head) ? ENVIRON["SEMVER_HEAD_LABEL"] : ""
+            next
+        }
+        NR%3==2 {
+            kind=""
+            message=$0
+            n=split($0, lines, "\n"); line=tolower(lines[1])
+            if(line !~ /^[a-z]+(\([^()]+\))?!?:[[:space:]]+[^[:space:]]/) next
+            type=line; sub(/[( !:].*$/, "", type)
+            if(line ~ /^[^:]+!:/) kind="major"
+            else if(index(" " minors " ", " " type " ")) kind="minor"
+            else if(index(" " patches " ", " " type " ")) kind="patch"
+            for(i=1; i<=n; i++)
+                if(lines[i] ~ /^BREAKING[ -]CHANGE:[[:space:]]+[^[:space:]]/) kind="major"
+            next
+        }
+        kind!="" {
+            match($0,/^[a-zA-Z]+(\([^()]+\))?!?:[[:space:]]*/); pos=RLENGTH
+            if(subject!="") $0=subject
+            else if(label!="" && substr($0,pos+1,length(label))==label)
+                $0=substr($0,1,pos) substr($0,pos+length(label)+1)
+            else if(label!="" && substr($0,length($0)-length(label)+1)==label)
+                $0=substr($0,1,length($0)-length(label))
+            if(kind=="major" || (kind=="minor" && bump!="major") || bump=="") bump=kind
+            if(kind=="major") group="breaking"
+            else if(kind=="minor") group="features"
+            else if($0 ~ /^perf[:(]/) group="performance"
+            else group="fixes"
+            if(ENVIRON["SEMVER_EXACT_MESSAGE"]=="true") {
+                n=split(message,lines,"\n")
+                if(current) {
+                    lines[1]=$0
+                    if(ENVIRON["SEMVER_COMMIT_VERSION"]=="true") {
+                        match(lines[1],/^[a-zA-Z]+(\([^()]+\))?!?:[[:space:]]*/); pos=RLENGTH
+                        lines[1]=substr(lines[1],1,pos) "[" ENVIRON["SEMVER_RELEASE_TAG"] "] " substr(lines[1],pos+1)
+                    }
+                }
+                print "- " lines[1] >> (dir "/" group)
+                while(n>1 && lines[n]=="") n--
+                for(i=2;i<=n;i++) print "  " lines[i] >> (dir "/" group)
+                next
+            }
+            print "- " $0 >> (dir "/" group)
+        }
+        END {print bump}
+    ' "$state/messages" > "$state/bump"
+    IFS= read -r bump < "$state/bump"
+}
+
+phase() { printf '%s\n' "$1" > "$state/phase.new"; mv "$state/phase.new" "$state/phase"; }
+
+finish() {
+    git update-ref -d refs/semver/original
+    # state is an exact directory under this clone's Git directory.
+    rm -rf "$state"
+}
+
+fetch_remote() {
+    git -c gc.auto=0 -c maintenance.auto=false fetch --quiet --prune --no-tags --no-recurse-submodules \
+        "$remote" '+refs/heads/*:refs/semver/heads/*' '+refs/tags/*:refs/semver/tags/*'
+    target=$(git rev-parse --verify "refs/semver/heads/${destination#refs/heads/}" 2>/dev/null || :)
+    printf '%s\n' "$target" > "$state/target"
+    remote_integrated=true
+    if test -n "$target" && ! git merge-base --is-ancestor "$target" HEAD; then remote_integrated=false; fi
+    upstream_ref=$(git rev-parse --symbolic-full-name "$branch@{upstream}" 2>/dev/null || :)
+    case "$upstream_ref" in
+        refs/remotes/*) if test -n "$target"; then git update-ref "$upstream_ref" "$target"; fi ;;
+    esac
+}
+
+mark_ready() {
+    # pre-push compares this baseline with Git's existing remote advertisement.
+    ready_head=$release_head
+    test ! -f "$state/after-amend" || IFS= read -r ready_head < "$state/after-amend"
+    {
+        printf '%s\n' "$ready_head" "$branch" "$remote" "$destination" "$fetch_url" "$target" "$remote_integrated"
+    } > "$state/ready"
+    mv "$state/ready" "$gitdir/semver-ready"
+}
+
+assert_unpublished() {
+    test -z "$(git for-each-ref --contains="$1" --format='%(refname)' refs/semver/heads/ refs/semver/tags/)" ||
+        fail 'Refusing to rewrite a commit already published on this remote.'
+}
+
+draft_status() {
+    draft_active=false
+    test -f "$draft/head" || return 0
+    IFS= read -r draft_head < "$draft/head"
+    IFS= read -r draft_tag < "$draft/tag"
+    IFS= read -r draft_tag_oid < "$draft/tag-oid"
+    # A successful ordinary push needs no post-push hook: the next fetch
+    # recognizes that the draft has become a published release.
+    if test -n "$(git for-each-ref --contains="$draft_head" --format='%(refname)' refs/semver/heads/ refs/semver/tags/)"; then
+        remote_tag=$(git rev-parse --verify "refs/semver/tags/$draft_tag" 2>/dev/null || :)
+        # A later tag-only push is safe only after a fetch confirms publication.
+        printf '%s\n' "$draft_head" > "$draft/published"
+        test "$remote_tag" = "$draft_tag_oid" || fail "Draft commit is already published but its release tag is missing or changed. Publish the recorded tag with git push $remote refs/tags/$draft_tag, then run git semver --sync."
+        if test -f "$draft/generated"; then
+            # Repeated preparation can record the same commit more than once;
+            # update-ref transactions require each ref to appear only once.
+            deleted_refs=' '
+            while read -r generated; do
+                case "$deleted_refs" in *" $generated "*) continue ;; esac
+                printf 'delete refs/semver/clean/%s\n' "$generated"
+                deleted_refs="$deleted_refs$generated "
+            done < "$draft/generated" > "$state/delete-clean-refs"
+            git update-ref --stdin < "$state/delete-clean-refs"
+        fi
+        rm -rf "$draft"
+        return 0
+    fi
+    draft_active=true
+}
+# Restore generated fields only, preserving other JSON fields and code.
+# This builds a tree without changing the working tree or its real index.
+
+strip_tree() (
+    original=$1
+    metadata=$2
+    export GIT_INDEX_FILE=$state/strip-index
+    git -c core.hooksPath=/dev/null read-tree "$original"
+    for managed in "$changelog_file" "$version_file"; do
+        if test "$managed" = "$version_file"; then
+            test "${preserve_version:-false}" != true || continue
+        else
+            test "${preserve_changelog:-false}" != true || continue
+        fi
+        git -c core.hooksPath=/dev/null update-index --force-remove -- "$managed"
+        git ls-tree -z "$metadata" -- "$managed" > "$state/strip-entries"
+        git -c core.hooksPath=/dev/null update-index -z --index-info < "$state/strip-entries"
+    done
+    if test "${preserve_version:-false}" != true && test -n "$version_field" && git cat-file -e "$original:$version_file" 2>/dev/null; then
+        if git show "$metadata:$version_file" > "$state/strip-baseline" 2>/dev/null; then
+            previous_version=$(version < "$state/strip-baseline") || fail 'Cannot restore the JSON release baseline.'
+        else previous_version=$initial_version; fi
+        git show "$original:$version_file" > "$state/strip-version"
+        version "$previous_version" < "$state/strip-version" > "$state/stripped-version"
+        filemode=$(git ls-tree "$original" -- "$version_file")
+        filemode=${filemode%% *}
+        blob=$(git hash-object -w "$state/stripped-version")
+        git -c core.hooksPath=/dev/null update-index --add --cacheinfo "$filemode,$blob,$version_file"
+    fi
+    git write-tree
+)
+
+copy_commit() (
+    original=$1
+    tree=$2
+    parent=${3:-}
+    git log -1 --format='%an%n%ae%n%aI' "$original" > "$state/copy-message"
+    commit_message "$original" >> "$state/copy-message"
+    {
+        IFS= read -r GIT_AUTHOR_NAME
+        IFS= read -r GIT_AUTHOR_EMAIL
+        IFS= read -r GIT_AUTHOR_DATE
+        export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE
+        if test -n "$parent"; then
+            git commit-tree "$tree" -p "$parent"
+        else
+            git commit-tree "$tree"
+        fi
+    } < "$state/copy-message"
+)
+
+prepare_release() {
+    release_tag=
+    git log -1 --format='%H%n%P' > "$state/head-info"
+    {
+        IFS= read -r release_head
+        IFS= read -r release_parents
+    } < "$state/head-info"
+    release_parent=${release_parents%% *}
+    draft_status
+    IFS= read -r target < "$state/target"
+    if test -n "$target" && git merge-base --is-ancestor HEAD "$target"; then return; fi
+    # The fetched destination is authoritative, including when local code is behind.
+    baseline=$target
+    if test -n "$baseline"; then
+        if git show "$baseline:$version_file" > "$state/baseline-version" 2>/dev/null; then old=$(version < "$state/baseline-version") || fail 'Cannot read the destination version.'
+        else old=$initial_version; fi
+    else
+        if test -n "$release_parent" && git show "$release_parent:$version_file" > "$state/baseline-version" 2>/dev/null; then old=$(version < "$state/baseline-version") || fail 'Cannot read the starting version.'
+        elif test -f "$version_file"; then old=$(version < "$version_file") || fail 'Cannot read the starting version.'
+        else old=$initial_version; fi
+    fi
+    next_version "$old" '' >/dev/null || fail "Invalid baseline version: $old"
+    range=HEAD
+    test -z "$baseline" || range=$baseline..HEAD
+    for group in breaking features fixes performance; do : > "$state/$group"; done
+    release_messages
+    if test -z "$bump" && test "$draft_active" != true; then return 0; fi
+    assert_unpublished HEAD
+    test -z "$(git rev-list --merges "${target:+$target..}HEAD")" || fail 'Release preparation requires linear unpublished history.'
+    if test -f "$version_file"; then
+        cp "$version_file" "$state/version"
+    elif test -z "$version_field"; then
+        printf '%s\n' "$old" > "$state/version"
+    else
+        fail 'Commit the JSON version source before releasing.'
+    fi
+    current=$(version < "$state/version") || fail 'Expected exactly one standalone JSON version field.'
+    manual_version=$current
+    preserve_version=false
+    preserve_changelog=false
+    if test "$draft_active" = true; then
+        test ! -f "$draft/manual-version" || preserve_version=true
+        test ! -f "$draft/manual-changelog" || preserve_changelog=true
+    fi
+    pure_head=$release_head
+    metadata=
+    if test "$draft_active" = true && test ! -f "$state/clean-tip"; then
+        if test "$draft_head" = "$pure_head"; then
+            metadata=$(git rev-parse --verify "refs/semver/clean/$draft_head" 2>/dev/null || :)
+        elif test "$draft_head" = "$release_parent"; then
+            metadata=$(git rev-parse --verify "refs/semver/clean/$release_parent" 2>/dev/null || :)
+        elif git merge-base --is-ancestor "$draft_head" HEAD; then
+            metadata=$(git rev-parse --verify "refs/semver/clean/$release_parent" 2>/dev/null || :)
+        elif test "$(git rev-parse "$draft_head^")" = "$release_parent"; then
+            # An explicit amend of the latest draft is supported too.
+            metadata=$(git rev-parse --verify "refs/semver/clean/$draft_head" 2>/dev/null || :)
+        else
+            fail 'Draft history changed outside SemVer. Run git semver --sync to reconcile it.'
+        fi
+        test -n "$metadata" || fail 'Missing clean draft history; run git semver --sync.'
+        expected=$(git show "$draft_head:$version_file" | version)
+        test "$current" = "$expected" || preserve_version=true
+        git diff --quiet "$draft_head" HEAD -- "$changelog_file" || preserve_changelog=true
+        pure_tree=$(strip_tree HEAD "$metadata")
+        pure_head=$(copy_commit HEAD "$pure_tree" "$release_parent")
+        if git show "$pure_head:$version_file" > "$state/baseline-version" 2>/dev/null; then current=$(version < "$state/baseline-version")
+        else current=$old; fi
+    fi
+    if test "$remote_integrated" = false; then
+        base=$(git merge-base HEAD "$target") || fail 'Cannot synchronize unrelated histories.'
+        expected=$(git show "$base:$version_file" | version)
+        test "$current" = "$expected" || preserve_version=true
+        git diff --quiet "$base" "$pure_head" -- "$changelog_file" || preserve_changelog=true
+    else
+        changelog_base=${target:-$release_parent}
+        test "$current" = "$old" || preserve_version=true
+        if test -n "$changelog_base" && ! git diff --quiet "$changelog_base" "$pure_head" -- "$changelog_file"; then preserve_changelog=true; fi
+    fi
+    if test "$preserve_version" = true || test "$preserve_changelog" = true; then warn_manual_metadata; fi
+    if test -z "$bump"; then
+        # An explicit amend may remove the last release-triggering message.
+        # Retract only this clone's unpublished metadata and provisional tag.
+        printf '%s\n' "$release_head" > "$state/before-amend"
+        phase amending
+        (
+            export GIT_INDEX_FILE=$state/index
+            git -c core.hooksPath=/dev/null read-tree "$pure_head"
+            commit_message HEAD > "$state/commit-message"
+            git -c core.hooksPath=/dev/null -c maintenance.auto=false -c gc.auto=0 commit --amend --cleanup=verbatim -F "$state/commit-message" --quiet
+        )
+        git rev-parse HEAD > "$state/after-amend"
+        git -c core.hooksPath=/dev/null restore --source=HEAD --staged --worktree -- "$version_file" "$changelog_file"
+        git update-ref -d "refs/tags/$draft_tag" "$draft_tag_oid"
+        rm -rf "$draft"
+        phase prepared
+        echo 'SemVer: retracted the unpublished release; no qualifying commits remain.'
+        return 0
+    fi
+    next=$(next_version "$old" "$bump")
+    if test "$preserve_version" = true; then
+        next_version "$manual_version" '' >/dev/null || fail "Manual version must use X.Y.Z: $manual_version"
+        next=$manual_version
+    fi
+    release_tag=$tag_prefix$next
+    git check-ref-format "refs/tags/$release_tag" || fail 'Invalid release tag.'
+    if git show-ref --verify --quiet "refs/semver/tags/$release_tag"; then
+        fail "Tag $release_tag already exists remotely; published tags are never overwritten."
+    fi
+    local_tag_oid=$(git rev-parse --verify "refs/tags/$release_tag" 2>/dev/null || :)
+    if test -n "$local_tag_oid"; then
+        if test "$draft_active" != true || test "$release_tag" != "$draft_tag" ||
+            test "$local_tag_oid" != "$draft_tag_oid"; then
+            fail "Tag $release_tag already exists; unrelated tags are never overwritten."
+        fi
+    fi
+    heading=$(printf '%b' "$changelog_heading")
+    if test "$changelog_exact_commit_message" = true; then
+        for group in breaking features fixes performance; do : > "$state/$group"; done
+        release_messages true
+    fi
+    test -n "$heading" || fail 'Changelog heading must not be empty.'
+    if test -n "$target"; then
+        raw_changelog=$state/raw-changelog
+        git show "$target:$changelog_file" > "$raw_changelog" 2>/dev/null || printf '%s\n' "$heading" > "$raw_changelog"
+    elif test -n "$metadata"; then
+        raw_changelog=$state/raw-changelog
+        git show "$pure_head:$changelog_file" > "$raw_changelog" 2>/dev/null || printf '%s\n' "$heading" > "$raw_changelog"
+    elif test -n "$release_parent"; then
+        raw_changelog=$state/raw-changelog
+        git show "$release_parent:$changelog_file" > "$raw_changelog" 2>/dev/null || printf '%s\n' "$heading" > "$raw_changelog"
+    elif test -f "$changelog_file"; then raw_changelog=$changelog_file
+    else raw_changelog=$state/raw-changelog; printf '%s\n' "$heading" > "$raw_changelog"; fi
+    # Normalize existing titles and CRLF, and render notes and the changelog in
+    # one process. Environment values preserve literal backslashes in titles.
+    SEMVER_CHANGELOG_HEADING=$heading \
+    SEMVER_REMOVE_EXTRA_HEADINGS=$changelog_remove_extra_headings \
+    SEMVER_BREAKING_TITLE=${changelog_breaking_title-} \
+    SEMVER_FEATURES_TITLE=${changelog_features_title-} \
+    SEMVER_FIXES_TITLE=${changelog_fixes_title-} \
+    SEMVER_PERFORMANCE_TITLE=${changelog_performance_title-} \
+    awk -v dir="$state" -v release_version="$next" '
+        BEGIN {
+            heading=ENVIRON["SEMVER_CHANGELOG_HEADING"]
+            count=split(heading,header,"\n")
+            split("breaking features fixes performance",groups," ")
+            titles[1]=ENVIRON["SEMVER_BREAKING_TITLE"]
+            titles[2]=ENVIRON["SEMVER_FEATURES_TITLE"]
+            titles[3]=ENVIRON["SEMVER_FIXES_TITLE"]
+            titles[4]=ENVIRON["SEMVER_PERFORMANCE_TITLE"]
+            notes="## " release_version "\n"
+            for(i=1;i<=4;i++) {
+                file=dir "/" groups[i]; entries=""
+                while((getline line < file)>0) entries=entries line "\n"
+                close(file)
+                if(entries=="") continue
+                notes=notes "\n"
+                if(titles[i]!="") notes=notes "### " titles[i] "\n\n"
+                notes=notes entries
+            }
+            printf "%s", notes > (dir "/notes")
+            printf "%s\n\n%s\n", heading,notes > (dir "/new-changelog")
+        }
+        {gsub(/\r/, "")}
+        ENVIRON["SEMVER_REMOVE_EXTRA_HEADINGS"]=="true" {
+            if($0~/^ {0,3}#([ \t]+|$)/) {intro=1; next}
+            if($0~/^ {0,3}#{2,6}([ \t]+|$)/) intro=0
+            if(intro) next
+            if(!started && $0~/^[[:space:]]*$/) next
+            started=1
+            print > (dir "/new-changelog")
+            next
+        }
+        NR<=count {
+            if(ENVIRON["SEMVER_REMOVE_EXTRA_HEADINGS"]!="true" || $0!~/^ {0,3}#([ \t]+|$)/)
+                prefix=prefix $0 "\n"
+            if($0!=header[NR]) custom_header=1
+            if(NR==count && custom_header) {
+                printf "%s", prefix > (dir "/new-changelog")
+                started=1
+            }
+            next
+        }
+        !started && /^[[:space:]]*$/ {next}
+        ENVIRON["SEMVER_REMOVE_EXTRA_HEADINGS"]=="true" && /^ {0,3}#([ \t]+|$)/ {next}
+        {started=1; print > (dir "/new-changelog")}
+        END {if(ENVIRON["SEMVER_REMOVE_EXTRA_HEADINGS"]!="true" && NR<count) printf "%s", prefix > (dir "/new-changelog")}
+    ' "$raw_changelog" || fail 'Cannot generate the changelog.'
+    if test "$preserve_changelog" = true; then
+        test -f "$changelog_file" || fail 'Restore the manually edited changelog before releasing.'
+        cp "$changelog_file" "$state/new-changelog"
+    fi
+    version "$next" < "$state/version" > "$state/new-version"
+    commit_message HEAD > "$state/commit-message"
+    if test "$commit_version" = true; then
+        SEMVER_RELEASE_TAG=$release_tag awk '
+            NR==1 {
+                match($0,/^[a-zA-Z]+(\([^()]+\))?!?:[[:space:]]*/); pos=RLENGTH
+                $0=substr($0,1,pos) "[" ENVIRON["SEMVER_RELEASE_TAG"] "] " substr($0,pos+1)
+            }
+            {print}
+        ' "$state/commit-message" > "$state/labeled-message"
+        mv "$state/labeled-message" "$state/commit-message"
+    fi
+    printf '%s\n' "$release_head" > "$state/before-amend"
+    phase amending
+    (
+        export GIT_INDEX_FILE=$state/index
+        git -c core.hooksPath=/dev/null read-tree HEAD
+        # Build both entries together. NUL-delimited paths retain spaces and
+        # unusual filenames; existing executable bits are preserved.
+        git ls-tree -z HEAD -- "$version_file" "$changelog_file" > "$state/file-modes"
+        git hash-object -w "$state/new-version" "$state/new-changelog" > "$state/blobs"
+        awk -v version_path="$version_file" -v changelog_path="$changelog_file" -v blobs="$state/blobs" '
+            BEGIN {RS="\0"}
+            {
+                tab=index($0,"\t"); path=substr($0,tab+1)
+                modes[path]=substr($0,1,6)
+            }
+            END {
+                RS="\n"
+                if((getline version_blob < blobs)!=1 || (getline changelog_blob < blobs)!=1) exit 1
+                paths[1]=version_path; paths[2]=changelog_path
+                objects[1]=version_blob; objects[2]=changelog_blob
+                for(i=1;i<=2;i++) {
+                    path=paths[i]; mode=(path in modes) ? modes[path] : "100644"
+                    if(mode!="100644" && mode!="100755") exit 1
+                    printf "%s %s\t%s%c", mode,objects[i],path,0
+                }
+            }
+        ' "$state/file-modes" > "$state/index-info" || fail 'Managed files must be regular files.'
+        git -c core.hooksPath=/dev/null update-index -z --index-info < "$state/index-info"
+        git -c core.hooksPath=/dev/null -c maintenance.auto=false -c gc.auto=0 commit --amend --cleanup=verbatim -F "$state/commit-message" --quiet
+    )
+    git rev-parse HEAD > "$state/after-amend"
+    git -c core.hooksPath=/dev/null restore --source=HEAD --staged --worktree -- "$version_file" "$changelog_file"
+    printf '%s\n' "$release_tag" > "$state/tag"
+    phase tagging
+    if test "$draft_active" = true; then
+        git update-ref -d "refs/tags/$draft_tag" "$draft_tag_oid"
+    fi
+    IFS= read -r prepared_head < "$state/after-amend"
+    git tag -a "$release_tag" --cleanup=verbatim -F "$state/notes" "$prepared_head"
+    git rev-parse "refs/tags/$release_tag" > "$state/tag-oid"
+    git update-ref "refs/semver/clean/$prepared_head" "$pure_head"
+    mkdir -p "$draft"
+    IFS= read -r prepared_tag_oid < "$state/tag-oid"
+    printf '%s\n' "$prepared_head" > "$draft/head"
+    printf '%s\n' "$release_tag" > "$draft/tag"
+    printf '%s\n' "$prepared_tag_oid" > "$draft/tag-oid"
+    if test "$preserve_version" = true; then : > "$draft/manual-version"; else rm -f "$draft/manual-version"; fi
+    if test "$preserve_changelog" = true; then : > "$draft/manual-changelog"; else rm -f "$draft/manual-changelog"; fi
+    printf '%s\n' "$prepared_head" >> "$draft/generated"
+    phase prepared
+    echo "SemVer: prepared $release_tag."
+}
+
+begin_transaction() {
+    test ! -d "$state" || fail 'An operation is active. Use --continue or --abort.'
+    test ! -d "$gitdir/semantic-version-sync" && test ! -f "$gitdir/semantic-version-pending" || fail 'Finish recovery with the old hooks before migrating.'
+    for operation in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+        test ! -e "$gitdir/$operation" || fail 'Finish or abort the current Git operation first.'
+    done
+    clean
+    enabled_branch "$branch" || fail 'This branch is not enabled in allowed_branches.'
+    load_tracking
+    test "$remote" != . || fail 'Use a remote tracking upstream.'
+    case "$destination" in refs/heads/*) ;; *) fail 'Upstream must be a branch.' ;; esac
+    # A triangular push must never silently publish to the pull upstream.
+    test "$pushremote" = "$remote" || fail 'Push remote differs from upstream; configure matching destinations.'
+    test "$custom_push" = false || fail 'Custom push refspecs are not supported by release preparation.'
+    test "$mirror" != true || fail 'Mirror remotes are not supported by release preparation.'
+    fetch_url=$(git remote get-url "$remote") || fail 'Configure the remote first.'
+    push_urls=$(git remote get-url --push --all "$remote") || fail 'Cannot determine the push destination.'
+    test "$push_urls" = "$fetch_url" || fail 'Use one matching fetch/push URL so synchronization checks the actual destination.'
+    if test "$has_upstream" = false; then
+        git config --local "branch.$branch.remote" "$remote"
+        git config --local "branch.$branch.merge" "$destination"
+    fi
+    mkdir "$state"
+    cp "$root/.githooks/semver" "$state/engine"
+    cp "$root/.githooks/post-commit" "$state/post-commit"
+    cp "$config" "$state/config"
+    printf '%s\n' "$branch" > "$state/branch"
+    printf '%s\n' "$remote" > "$state/remote"
+    printf '%s\n' "$destination" > "$state/destination"
+    printf '%s\n' "$fetch_url" > "$state/fetch-url"
+    git rev-parse HEAD > "$state/original"
+    test ! -d "$draft" || cp -R "$draft" "$state/draft-before"
+    git update-ref refs/semver/original HEAD
+}
+
+finalize_release() {
+    prepare_release
+    mark_ready
+    rm -f "$pending"
+    finish
+    echo 'SemVer: ready for git push.'
+}
+
+# Manual commands source only the definitions above, in their existing shell.
+if test "${SEMVER_LOAD_FUNCTIONS:-}" = 1; then return 0; fi
+
+# Automatic commit entry point.
+set -eu
+test "$(git config --get semver.enabled || :)" = true || exit 0
+gitdir=$(git rev-parse --absolute-git-dir)
+for operation in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+    test ! -e "$gitdir/$operation" || exit 0
+done
+# Git invokes this hook at the working tree root.
+root=$PWD
+
+# Keep errexit active for every preparation step. Git retains the original code
+# commit if release preparation fails in this hook.
+post_commit_exit() {
+    result=$?
+    trap - 0
+    if ! semver_unlock; then result=1; fi
+    if test "$result" -ne 0; then
+        echo 'SemVer: the code commit exists, but release preparation is incomplete. Fix the error, then run git semver --sync before pushing.' >&2
+    fi
+    exit "$result"
+}
+trap post_commit_exit 0
+semver_init
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+enabled_branch "$branch" || exit 0
+semver_lock
+
+# Fetch once, refresh release metadata, and leave code integration to --sync.
+: > "$pending"
+begin_transaction
+phase sync
+fetch_remote
+finalize_release
