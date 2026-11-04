@@ -71,7 +71,71 @@ This is a Manifest V3 extension built with plain JavaScript, HTML, and CSS.
 | `popup.html` | Popup interface. |
 | `popup.js` | Preferences, weekly calculations, and refresh behavior. |
 | `style.css` | Popup styling. |
-| `bridge.js` | Captures Paychex's own successful timecard responses. |
+| `bridge-paychex.js` | Captures Paychex's own successful timecard responses. |
 | `relay.js` | Relays captured data to the extension and local storage. |
 
 After editing the source, click **Reload** on the extension's card at `chrome://extensions`. Reload the Paychex tab and repeat the capture steps above to use updated scripts.
+
+### Bridge contract
+
+Each provider bridge translates its native responses into this message, posted
+with `window.postMessage(message, location.origin)`:
+
+```js
+{
+  channel: "work-time-capture-v1",
+  type: "capture",
+  schemaVersion: 1,
+  source: "paychex", // Stable provider identifier, e.g. "paylocity".
+  at: 1793692800000, // Capture timestamp: Unix milliseconds.
+  entries: [{
+    date: "2026-11-03", // Payroll date, YYYY-MM-DD; do not shift by local timezone.
+    in: 1793692800000, // Unix milliseconds, or null when unavailable.
+    out: null,        // Unix milliseconds, or null for an open row.
+    regular: 3600,    // Recorded regular paid seconds.
+    ot: 0,           // Recorded overtime paid seconds.
+    unpaid: 0,       // Unpaid seconds; not included in paid totals.
+    nonwork: false,   // True for rows excluded from work totals.
+    payType: "Regular"
+  }]
+}
+```
+
+Send one row per top-level timecard group; do not also emit its detail rows.
+Durations must be finite nonnegative numbers. An empty entries array is valid.
+`relay.js` owns validation of incoming and stored captures; the popup uses normalized dates and
+numeric timestamps without parsing provider-specific date formats.
+
+Load `relay.js` in the isolated world before loading the
+provider bridge in the main world. The relay accepts same-window, same-origin
+capture messages and stores each provider separately under
+`capturedTimecard:<source>`. The popup requests the latest in-memory capture with
+`{ type: "WORK_TIME_READ", source: "paychex" }`, the relay falls back to that provider's
+validated stored capture. The response contains `schemaVersion`, `source`, `at`, and `entries`.
+The relay retains the guard for invalidated extension contexts.
+
+To add another integration, implement its bridge, register its popup mode and
+refresh handler, and add its domain permissions. Paychex is currently the only
+implemented provider. Older Paychex cache entries are not used by this format;
+reload the timecard after installing the bridge and refresh to capture new data.
+
+### Integration lifecycle
+
+Manual mode stops installed bridges and relays across registered provider tabs.
+Only the selected provider's chosen tab is started. Other provider tabs remain
+stopped. Refresh operations are serialized, and obsolete requests cannot start
+another integration after the mode changes. The relay also watches saved mode
+changes and stops itself and its bridge when its provider is deselected.
+
+A bridge exposes `window.__workTimeBridge = { stop }` in the main world. Its stop
+function restores the request handlers it installed, removes listeners, and
+prevents pending responses from publishing captures. It also handles the
+same-window `work-time-capture-v1` message with `type: "stop"` from the relay.
+The relay exposes its own stop function in the isolated world and removes its
+message and storage listeners on shutdown. Before injecting the relay, set
+`window.__workTimeSource` in the isolated world to the selected provider ID.
+Register each future provider's URL pattern and bridge filename in `modes` so
+mode changes can stop its scripts as well.
+
+After upgrading from scripts without lifecycle support, reload existing Paychex
+tabs once to remove the previously injected scripts.

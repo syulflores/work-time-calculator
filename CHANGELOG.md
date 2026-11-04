@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.3.0
+
+- feat: made a clear separation from manual mode and from each of the integrations
+
 ## 0.2.1
 
 - fix: reordered elements and condensed some other elements

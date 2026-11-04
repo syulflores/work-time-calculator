@@ -1,11 +1,6 @@
 const $ = (id) => document.getElementById(id);
-const msDate = (s) => {
-  const m = /\/Date\((-?\d+)/.exec(s || "");
-  return m ? Number(m[1]) : null;
-};
 const localDay = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const dayFromMs = (ms) => new Date(ms).toISOString().slice(0, 10); // Paychex ApplyToDate is a date-only midnight UTC value.
 const fmt = (secs) =>
   `${Math.floor(Math.max(0, secs) / 3600)}h ${String(Math.floor((Math.max(0, secs) % 3600) / 60)).padStart(2, "0")}m`;
 const dateTime = (ms) =>
@@ -17,10 +12,11 @@ const dateTime = (ms) =>
 // Register future modes with their own refresh handler here.
 const modes = {
   manual: { label: "Manual", refresh: refreshManual },
-  paychex: { label: "Paychex", refresh: refreshPaychex },
+  paychex: { label: "Paychex", refresh: refreshPaychex, url: "https://paychex.centralservers.com/*", bridge: "bridge-paychex.js" },
 };
 let data = null;
 let refreshId = 0;
+let integrationQueue = Promise.resolve();
 const isManual = () => $("mode").value === "manual";
 const isDaily = () => $("periodMode").value === "day";
 const periodValues = {
@@ -54,8 +50,42 @@ function refresh() {
   for (const id of ["worked", "remaining", "out"]) $(id).textContent = "?";
   $("period").textContent = "";
   $("detail").textContent = "";
-  return modes[$("mode").value].refresh();
+  const requestId = refreshId;
+  const mode = $("mode").value;
+  integrationQueue = integrationQueue.catch(() => {}).then(async () => {
+    if (requestId !== refreshId) return;
+    try {
+      await stopIntegrations();
+      if (requestId !== refreshId) return;
+      await modes[mode].refresh();
+    } catch (error) {
+      if (requestId === refreshId) $("status").textContent = "Notice: " + error.message;
+    }
+  });
+  return integrationQueue;
 }
+// Stop installed integrations across all registered provider tabs before starting one.
+async function stopIntegrations() {
+  const urls = Object.values(modes).map((mode) => mode.url).filter(Boolean);
+  const tabs = urls.length ? await chrome.tabs.query({ url: urls }) : [];
+  await Promise.all(tabs.map(async (tab) => {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id }, world: "ISOLATED",
+        func: () => window.__workTimeRelayV1?.stop(),
+      });
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id }, world: "MAIN",
+        func: () => window.__workTimeBridge?.stop(),
+      });
+    } catch (error) {
+      // A closed or navigated tab no longer has a running integration.
+      const current = await chrome.tabs.get(tab.id).catch(() => null);
+      if (current && urls.some((url) => current.url?.startsWith(url.slice(0, -1)))) throw error;
+    }
+  }));
+}
+
 const clockMinutes = (s) => {
   if (!/^\d{2}:\d{2}$/.test(s || "")) return null;
   const [h, m] = s.split(":").map(Number);
@@ -73,9 +103,7 @@ function calculate() {
   const first = localDay(begin),
     last = localDay(new Date(end.getTime() - 86400000));
   const entries = data.entries.filter((x) => {
-    const m = msDate(x.date);
-    if (m === null) return false;
-    const day = dayFromMs(m);
+    const day = x.date;
     return day >= first && day <= last && !x.nonwork;
   });
   // One top-level timecard group is counted once; never also add TimeCardDetails.
@@ -95,8 +123,8 @@ function calculate() {
   // We cannot safely infer an active clock-in from a transaction code alone.
   // Use the current date's open timecard row only if it has a clock-in and no clock-out.
   const open = entries
-    .filter((x) => x.in && !x.out)
-    .sort((a, b) => (msDate(b.in) || 0) - (msDate(a.in) || 0))[0];
+    .filter((x) => x.in !== null && x.out === null)
+    .sort((a, b) => (b.in || 0) - (a.in || 0))[0];
   let live = 0,
     clockout = "Not currently detectable";
   let liveInfo = "";
@@ -115,7 +143,7 @@ function calculate() {
         ).getTime();
 
   if (open || manualStart !== null) {
-    const start = manualStart !== null ? manualStart : msDate(open.in);
+    const start = manualStart !== null ? manualStart : open.in;
     if (
       start !== null &&
       start <= Date.now() &&
@@ -124,7 +152,7 @@ function calculate() {
       live = Math.max(0, (Date.now() - start) / 1000);
       const currentAlreadyCounted =
         manualStart !== null &&
-        entries.some((x) => msDate(x.in) === start && Number(x.regular) > 0);
+        entries.some((x) => x.in === start && Number(x.regular) > 0);
       if (!currentAlreadyCounted) {
         remaining = Math.max(0, target - recorded - live);
       }
@@ -163,27 +191,32 @@ async function refreshPaychex() {
     const tabs = await chrome.tabs.query({
       url: "https://paychex.centralservers.com/*",
     });
+    if (requestId !== refreshId) return;
     const tab = tabs.find((t) => t.active) || tabs[0];
     if (!tab) throw Error("Open paychex.centralservers.com and sign in first.");
-    // Install hooks before Paychex makes its next timecard request.
     await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["bridge.js"],
-      world: "MAIN",
+      target: { tabId: tab.id }, world: "ISOLATED",
+      func: (source) => { window.__workTimeSource = source; }, args: ["paychex"],
     });
+    if (requestId !== refreshId) return;
+    // Install the receiver before the bridge can emit a capture.
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ["relay.js"],
       world: "ISOLATED",
     });
-    let r = await chrome.tabs.sendMessage(tab.id, {
-      type: "PAYCHEX_HOURS_READ",
+    if (requestId !== refreshId) return;
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: [modes.paychex.bridge],
+      world: "MAIN",
     });
-    if (!Array.isArray(r?.entries)) {
-      const saved = await chrome.storage.local.get("capturedTimecard");
-      r = saved.capturedTimecard;
-    }
-    if (!Array.isArray(r?.entries))
+    if (requestId !== refreshId) return;
+    let r = await chrome.tabs.sendMessage(tab.id, {
+      type: "WORK_TIME_READ",
+      source: "paychex",
+    });
+    if (!Array.isArray(r?.entries) || r.source !== "paychex")
       throw Error(
         "No timecard captured. Leave Paychex open, reload its timecard page, and click Refresh again.",
       );
