@@ -22,6 +22,19 @@ const modes = {
 let data = null;
 let refreshId = 0;
 const isManual = () => $("mode").value === "manual";
+const isDaily = () => $("periodMode").value === "day";
+const periodValues = {
+  week: { target: "40", manualHours: "0" },
+  day: { target: "8", manualHours: "0" },
+};
+
+function updatePeriodSettings() {
+  const values = periodValues[$("periodMode").value];
+  $("targetLabel").textContent = isDaily() ? "Daily target (hours)" : "Weekly target (hours)";
+  $("weekStartSetting").hidden = isDaily();
+  $("target").max = isDaily() ? "24" : "168";
+  for (const key of ["target", "manualHours"]) $(key).value = values[key];
+}
 
 function refreshManual() {
   data = { entries: [] };
@@ -54,9 +67,9 @@ function calculate() {
   const now = new Date(),
     startDay = Number($("start").value),
     begin = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  begin.setDate(begin.getDate() - ((begin.getDay() - startDay + 7) % 7));
+  if (!isDaily()) begin.setDate(begin.getDate() - ((begin.getDay() - startDay + 7) % 7));
   const end = new Date(begin);
-  end.setDate(end.getDate() + 7);
+  end.setDate(end.getDate() + (isDaily() ? 1 : 7));
   const first = localDay(begin),
     last = localDay(new Date(end.getTime() - 86400000));
   const entries = data.entries.filter((x) => {
@@ -77,7 +90,7 @@ function calculate() {
       Math.max(0, Number(x.regular) || 0) + Math.max(0, Number(x.ot) || 0);
     if (!x.out) openEntries++;
   }
-  const target = Math.max(0, Number($("target").value) || 40) * 3600;
+  const target = Math.max(0, Number($("target").value) || (isDaily() ? 8 : 40)) * 3600;
   let remaining = Math.max(0, target - recorded);
   // We cannot safely infer an active clock-in from a transaction code alone.
   // Use the current date's open timecard row only if it has a clock-in and no clock-out.
@@ -131,7 +144,7 @@ function calculate() {
   $("remaining").textContent = fmt(remaining);
   $("out").textContent = clockout;
   $("period").textContent =
-    `Workweek: ${first} through ${last} · ${isManual() ? "manual entry" : entries.length + " timecard rows"}`;
+    `${isDaily() ? "Day: " + first : "Workweek: " + first + " through " + last} · ${isManual() ? "manual entry" : entries.length + " timecard rows"}`;
   $("detail").textContent =
     liveInfo +
     (open || manualStart !== null
@@ -193,6 +206,9 @@ async function refreshPaychex() {
 (async () => {
   const saved = await chrome.storage.local.get([
     "mode",
+    "periodMode",
+    "dailyTarget",
+    "dailyManualHours",
     "manualHours",
     "start",
     "target",
@@ -211,11 +227,27 @@ async function refreshPaychex() {
     chrome.storage.local.set({ mode: $("mode").value });
     refresh();
   });
+  periodValues.week.target = saved.target ?? "40";
+  periodValues.week.manualHours = saved.manualHours ?? "0";
+  periodValues.day.target = saved.dailyTarget ?? "8";
+  periodValues.day.manualHours = saved.dailyManualHours ?? "0";
+  $("periodMode").value = saved.periodMode === "day" ? "day" : "week";
+  $("periodMode").addEventListener("change", () => {
+    chrome.storage.local.set({ periodMode: $("periodMode").value });
+    updatePeriodSettings();
+    calculate();
+  });
   for (const key of ["start", "target", "break", "manualHours"])
     if (saved[key] != null) $(key).value = saved[key];
+  updatePeriodSettings();
   for (const key of ["start", "target", "break", "manualHours"])
     $(key).addEventListener("change", () => {
-      chrome.storage.local.set({ [key]: $(key).value });
+      const periodSpecific = key === "target" || key === "manualHours";
+      if (periodSpecific) periodValues[$("periodMode").value][key] = $(key).value;
+      const storageKey = periodSpecific && isDaily()
+        ? (key === "target" ? "dailyTarget" : "dailyManualHours")
+        : key;
+      chrome.storage.local.set({ [storageKey]: $(key).value });
       calculate();
     });
   if (saved.manualIn) $("manualIn").value = saved.manualIn;

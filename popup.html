@@ -22,7 +22,13 @@
       </label>
     </section>
     <section class="settings">
-      <label
+      <label>Calculate for
+        <select id="periodMode">
+          <option value="week">Week</option>
+          <option value="day">Day</option>
+        </select>
+      </label>
+      <label id="weekStartSetting"
         >Week starts
         <select id="start">
           <option value="0">Sunday</option>
@@ -30,7 +36,7 @@
           <option value="6">Saturday</option>
         </select></label
       ><label
-        >Weekly target (hours)
+        ><span id="targetLabel">Weekly target (hours)</span>
         <input
           id="target"
           type="number"
