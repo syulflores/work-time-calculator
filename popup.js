@@ -1,8 +1,9 @@
 const $ = (id) => document.getElementById(id);
 const localDay = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const fmt = (secs) =>
-  `${Math.floor(Math.max(0, secs) / 3600)}h ${String(Math.floor((Math.max(0, secs) % 3600) / 60)).padStart(2, "0")}m`;
+const unitSeconds = () => $("timeUnit").value === "hours" ? 3600 : 60;
+const displayNumber = (value) => Number(Number(value).toFixed(10));
+const fmt = (secs) => `${Number((Math.max(0, secs) / unitSeconds()).toFixed(2))} ${$("timeUnit").value === "hours" ? "hours" : "minutes"}`;
 const dateTime = (ms) =>
   new Date(ms).toLocaleString([], {
     weekday: "short",
@@ -19,6 +20,17 @@ let refreshId = 0;
 let integrationQueue = Promise.resolve();
 const isManual = () => $("mode").value === "manual";
 const isDaily = () => $("periodMode").value === "day";
+const unpaidValues = { manual: "0", paychex: "0" };
+// Saved unpaid values remain minutes, regardless of the displayed unit.
+const unpaidMinutes = () => Math.max(0, Number($("break").value) || 0) *
+  ($("timeUnit").value === "hours" ? 60 : 1);
+function updateUnpaidInput() {
+  const hours = $("timeUnit").value === "hours";
+  const unit = hours ? "hours" : "minutes";
+  $("breakLabel").textContent = `${isManual() ? "Total unpaid time today" : "Additional unpaid time planned"} (${unit})`;
+  $("break").max = hours ? "8" : "480";
+  $("break").value = Number((Number(unpaidValues[$("mode").value]) / (hours ? 60 : 1)).toFixed(10));
+}
 const periodValues = {
   week: { target: "40", manualHours: "0" },
   day: { target: "8", manualHours: "0" },
@@ -26,15 +38,15 @@ const periodValues = {
 
 function updatePeriodSettings() {
   const values = periodValues[$("periodMode").value];
-  $("targetLabel").textContent = isDaily() ? "Daily target (hours)" : "Weekly target (hours)";
-  $("weekStartSetting").hidden = isDaily();
-  $("target").max = isDaily() ? "24" : "168";
-  for (const key of ["target", "manualHours"]) $(key).value = values[key];
+
+  $("manualSettings").hidden = !isManual() || isDaily();
+
+  $("manualHours").value = displayNumber(Number(values.manualHours) * 3600 / unitSeconds());
 }
 
 function refreshManual() {
   data = { entries: [] };
-  $("status").textContent = "Manual mode: enter your recorded hours and today's clock-in.";
+  $("status").textContent = "Manual mode: enter your first clock-in, target, and total unpaid time today.";
   calculate();
 }
 
@@ -42,7 +54,8 @@ function refresh() {
   refreshId++;
   data = null;
   $("refresh").disabled = false;
-  $("manualSettings").hidden = !isManual();
+  $("manualSettings").hidden = !isManual() || isDaily();
+  updateUnpaidInput();
   $("refresh").textContent = isManual() ? "Recalculate" : "Refresh from Paychex";
   $("foot").textContent = isManual()
     ? "The estimate is not an official payroll total. This extension does not clock you in or out."
@@ -92,94 +105,64 @@ const clockMinutes = (s) => {
   return h < 24 && m < 60 ? h * 60 + m : null;
 };
 
+// Both modes supply inputs to the same clock-out equation.
+function shiftEstimate(start, target, unpaid, now) {
+  const out = start + (target + unpaid) * 1000;
+  return { out, remaining: Math.max(0, (out - now) / 1000) };
+}
+
 function calculate() {
   if (!data) return;
-  const now = new Date(),
-    startDay = Number($("start").value),
-    begin = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (!isDaily()) begin.setDate(begin.getDate() - ((begin.getDay() - startDay + 7) % 7));
+  const now = new Date(), nowMs = now.getTime(), today = localDay(now);
+  const begin = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (!isDaily()) begin.setDate(begin.getDate() - ((begin.getDay() - Number($("start").value) + 7) % 7));
   const end = new Date(begin);
   end.setDate(end.getDate() + (isDaily() ? 1 : 7));
-  const first = localDay(begin),
-    last = localDay(new Date(end.getTime() - 86400000));
-  const entries = data.entries.filter((x) => {
-    const day = x.date;
-    return day >= first && day <= last && !x.nonwork;
-  });
-  // One top-level timecard group is counted once; never also add TimeCardDetails.
+  const lastDay = new Date(end);
+  lastDay.setDate(lastDay.getDate() - 1);
+  const first = localDay(begin), last = localDay(lastDay);
   const seen = new Set();
-  let recorded = isManual() ? Math.max(0, Number($("manualHours").value) || 0) * 3600 : 0,
-    openEntries = 0;
-  for (const x of entries) {
-    const k = [x.date, x.in, x.out, x.regular, x.ot].join("|");
-    if (seen.has(k)) continue;
-    seen.add(k);
-    recorded +=
-      Math.max(0, Number(x.regular) || 0) + Math.max(0, Number(x.ot) || 0);
-    if (!x.out) openEntries++;
+  const entries = data.entries.filter((row) => {
+    const key = JSON.stringify(row);
+    if (row.nonwork || row.date < first || row.date > last || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const paid = (row) => Math.max(0, Number(row.regular) || 0) + Math.max(0, Number(row.ot) || 0);
+  const target = Math.max(0, Number(periodValues[$("periodMode").value].target) || 0) * 3600;
+  const previous = isDaily() ? 0 : isManual()
+    ? Math.max(0, Number($("manualHours").value) || 0) * unitSeconds()
+    : entries.filter((row) => row.date < today).reduce((sum, row) => sum + paid(row), 0);
+  const todayTarget = Math.max(0, target - previous);
+  const rows = entries.filter((row) => row.date === today);
+  const punches = rows.filter((row) => Number.isFinite(row.in) && row.in <= nowMs)
+    .sort((a, b) => a.in - b.in);
+  let gap = 0, coveredUntil = null;
+  for (const row of punches) {
+    if (coveredUntil !== null && row.in > coveredUntil) gap += (row.in - coveredUntil) / 1000;
+    const finish = row.out === null ? nowMs : Math.min(nowMs, Math.max(row.in, row.out));
+    coveredUntil = Math.max(coveredUntil ?? row.in, finish);
   }
-  const target = Math.max(0, Number($("target").value) || (isDaily() ? 8 : 40)) * 3600;
-  let remaining = Math.max(0, target - recorded);
-  // We cannot safely infer an active clock-in from a transaction code alone.
-  // Use the current date's open timecard row only if it has a clock-in and no clock-out.
-  const open = entries
-    .filter((x) => x.in !== null && x.out === null)
-    .sort((a, b) => (b.in || 0) - (a.in || 0))[0];
-  let live = 0,
-    clockout = "Not currently detectable";
-  let liveInfo = "";
-  const manual = $("manualEnabled").checked
-    ? clockMinutes($("manualIn").value)
-    : null;
-  const manualStart =
-    manual === null
-      ? null
-      : new Date(
-          now.getFullYear(),
-          now.getMonth(),
-          now.getDate(),
-          Math.floor(manual / 60),
-          manual % 60,
-        ).getTime();
-
-  if (open || manualStart !== null) {
-    const start = manualStart !== null ? manualStart : open.in;
-    if (
-      start !== null &&
-      start <= Date.now() &&
-      Date.now() - start < 24 * 3600000
-    ) {
-      live = Math.max(0, (Date.now() - start) / 1000);
-      const currentAlreadyCounted =
-        manualStart !== null &&
-        entries.some((x) => x.in === start && Number(x.regular) > 0);
-      if (!currentAlreadyCounted) {
-        remaining = Math.max(0, target - recorded - live);
-      }
-      clockout = dateTime(
-        Date.now() +
-          remaining * 1000 +
-          Math.max(0, Number($("break").value) || 0) * 60000,
-      );
-      liveInfo =
-        manualStart !== null
-          ? "Using manually entered clock-in; assumes current shift is not already included in recorded paid time. "
-          : "Active timecard detected; estimate assumes no other unpaid breaks. ";
-    }
-  }
-
-  $("worked").textContent = fmt(recorded + live);
-  $("remaining").textContent = fmt(remaining);
-  $("out").textContent = clockout;
-  $("period").textContent =
-    `${isDaily() ? "Day: " + first : "Workweek: " + first + " through " + last} · ${isManual() ? "manual entry" : entries.length + " timecard rows"}`;
+  const reportedUnpaid = rows.reduce((sum, row) => sum + row.unpaid, 0);
+  // Reported unpaid time and punch gaps can represent the same lunch.
+  const takenUnpaid = Math.max(gap, reportedUnpaid);
+  const enteredUnpaid = unpaidMinutes() * 60;
+  const totalUnpaid = isManual() ? enteredUnpaid : takenUnpaid + enteredUnpaid;
+  const manual = $("manualEnabled").checked ? clockMinutes($("manualIn").value) : null;
+  const manualStart = manual === null ? null : new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(manual / 60), manual % 60).getTime();
+  const start = manualStart ?? (isManual() ? null : punches[0]?.in ?? null);
+  const validStart = start !== null && start <= nowMs;
+  const estimate = validStart ? shiftEstimate(start, todayTarget, totalUnpaid, nowMs) : null;
+  $("worked").textContent = fmt(todayTarget);
+  $("remaining").textContent = estimate ? fmt(estimate.remaining) : "?";
+  $("out").textContent = estimate ? dateTime(estimate.out) : "Enter today's clock-in";
+  $("period").textContent = isDaily() ? "Day: " + today : "Workweek: " + first + " through " + last;
   $("detail").textContent =
-    liveInfo +
-    (open || manualStart !== null
-      ? ""
-      : "No open clock-in row returned. Enter today’s clock-in above and enable manual mode. ") +
-    (data.warning || "") +
-    (isManual() ? " Times are estimates; verify your payroll policies." : " Times are estimates; verify Paychex rounding and payroll policies.");
+    (isDaily() ? "" : "Earlier paid time: " + fmt(previous) + ". ") +
+    (isManual() ? "Include all unpaid breaks for today, taken or planned. " :
+      "Estimated unpaid time: " + fmt(takenUnpaid) + ". Add only planned breaks. ") +
+    (start !== null && !validStart ? "Clock-in must not be in the future. " : "") +
+    (data.warning || "");
 }
 
 async function refreshPaychex() {
@@ -246,6 +229,10 @@ async function refreshPaychex() {
     "start",
     "target",
     "break",
+    "breakUnit",
+    "timeUnit",
+    "manualTotalUnpaid",
+    "paychexAdditionalUnpaid",
     "manualIn",
     "manualEnabled",
   ]);
@@ -270,19 +257,65 @@ async function refreshPaychex() {
     updatePeriodSettings();
     calculate();
   });
-  for (const key of ["start", "target", "break", "manualHours"])
-    if (saved[key] != null) $(key).value = saved[key];
-  updatePeriodSettings();
-  for (const key of ["start", "target", "break", "manualHours"])
-    $(key).addEventListener("change", () => {
-      const periodSpecific = key === "target" || key === "manualHours";
-      if (periodSpecific) periodValues[$("periodMode").value][key] = $(key).value;
-      const storageKey = periodSpecific && isDaily()
-        ? (key === "target" ? "dailyTarget" : "dailyManualHours")
-        : key;
-      chrome.storage.local.set({ [storageKey]: $(key).value });
+  if (saved.start != null) $("start").value = saved.start;
+  unpaidValues.manual = saved.manualTotalUnpaid ?? "0";
+  unpaidValues.paychex = saved.paychexAdditionalUnpaid ?? saved.break ?? "0";
+  $("timeUnit").value = (saved.timeUnit ?? saved.breakUnit) === "hours" ? "hours" : "minutes";
+  function updateTimeInputs() {
+    const unit = $("timeUnit").value;
+    for (const [period, id, max] of [["week", "weeklyTarget", 168], ["day", "dailyTarget", 24]]) {
+      $(id).value = displayNumber(Number(periodValues[period].target) * 3600 / unitSeconds());
+      $(id).max = max * 3600 / unitSeconds();
+      $(id + "Label").textContent = (period === "week" ? "Weekly" : "Daily") + " target (" + unit + ")";
+    }
+    $("manualHoursLabel").textContent = "Paid time before today (" + unit + ")";
+    updatePeriodSettings();
+    updateUnpaidInput();
+  }
+  $("timeUnit").addEventListener("change", () => {
+    updateTimeInputs();
+    chrome.storage.local.set({ timeUnit: $("timeUnit").value });
+    calculate();
+  });
+  for (const [period, id, storageKey] of [["week", "weeklyTarget", "target"], ["day", "dailyTarget", "dailyTarget"]]) {
+    $(id).addEventListener("change", () => {
+      periodValues[period].target = Math.max(0, Number($(id).value) || 0) * unitSeconds() / 3600;
+      chrome.storage.local.set({ [storageKey]: periodValues[period].target });
       calculate();
     });
+  }
+  updateTimeInputs();
+  for (const key of ["start", "break", "manualHours"])
+    $(key).addEventListener("change", () => {
+      let value = $(key).value;
+      let storageKey = key;
+      if (key === "manualHours") {
+        value = Math.max(0, Number(value) || 0) * unitSeconds() / 3600;
+        periodValues[$("periodMode").value].manualHours = value;
+        storageKey = isDaily() ? "dailyManualHours" : "manualHours";
+      }
+      if (key === "break") {
+        value = unpaidMinutes();
+        unpaidValues[$("mode").value] = value;
+        storageKey = isManual() ? "manualTotalUnpaid" : "paychexAdditionalUnpaid";
+      }
+      chrome.storage.local.set({ [storageKey]: value });
+      calculate();
+    });
+  function showSettings(show) {
+    $("calculatorPage").hidden = show;
+    $("settingsPage").hidden = !show;
+    $("openSettings").hidden = show;
+    $("closeSettings").hidden = !show;
+    $("openSettings").setAttribute("aria-expanded", String(show));
+    $("pageTitle").textContent = show ? "Settings" : "Work Time Left";
+    (show ? $("closeSettings") : $("openSettings")).focus();
+  }
+  $("openSettings").addEventListener("click", () => showSettings(true));
+  $("closeSettings").addEventListener("click", () => showSettings(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("settingsPage").hidden) showSettings(false);
+  });
   if (saved.manualIn) $("manualIn").value = saved.manualIn;
   $("manualEnabled").checked = !!saved.manualEnabled;
   for (const key of ["manualIn", "manualEnabled"])

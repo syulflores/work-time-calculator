@@ -1,17 +1,16 @@
 # Work Time Calculator
 
-A Chrome extension that uses your Paychex timecard to estimate weekly work hours, time remaining toward a weekly target, and a projected clock-out time.
+A Chrome extension that estimates daily or weekly clock-out time from manual inputs or your Paychex timecard.
 
 The extension is read-only: it uses timecard responses loaded by Paychex itself and never sends clock-in or clock-out requests.
 
 ## Features
 
-- Calculate weekly hours from recorded regular and overtime entries.
-- Choose a Sunday, Monday, or Saturday workweek start.
-- Set a weekly hours target (40 hours by default).
-- Estimate clock-out time using a detected open shift or a manually entered clock-in.
-- Account for remaining unpaid break minutes.
-- Save settings locally in your browser.
+- Manual or Paychex daily and weekly clock-out estimates.
+- Shared equation: first clock-in + today's paid target + total unpaid time.
+- Daily target defaults to 8 hours; weekly target defaults to 40 hours.
+- Weekly mode subtracts paid hours completed before today from the weekly target.
+- Settings saved locally; estimates refresh every 30 seconds while the popup is open.
 
 ## Installation
 
@@ -25,23 +24,63 @@ No build step or additional dependencies are required. Microsoft Edge can also l
 
 ## Usage
 
-1. Open `https://paychex.centralservers.com/`, sign in, and open your timecard.
-2. Click the extension icon to open **Weekly hours** and initialize timecard capture.
-3. With the Paychex tab still open, navigate within Paychex to load the timecard data again, then click **Refresh from Paychex** in the extension.
-4. Set your workweek start, weekly target, and any **remaining** unpaid break minutes.
-5. Review your hours, remaining time, and projected clock-out.
+### Manual
 
-If Paychex does not return an open clock-in, enter today's clock-in and select **Use this clock-in to estimate clock-out**. Use **Clear manual clock-in** when you no longer need the override.
+1. Open Settings using the gear, select Manual and Day, and set your target and time units.
+   Return with the back arrow beside the Settings title.
+2. Enter your first clock-in today; enable the clock-in checkbox.
+3. Enter total unpaid minutes for today, including lunch already taken and any planned unpaid breaks.
+4. Review the projected clock-out and time until that projection (including unpaid time).
 
-Keep Paychex open and signed in. Estimates recalculate every 30 seconds while the popup is open. To get fresh timecard data, load it again in Paychex and click **Refresh from Paychex**.
+For example: 8:00 AM + 8 paid hours + 30 unpaid minutes = 4:30 PM.
+Daily mode needs no recorded-hours input. For Week, enter paid hours completed before today;
+the calculator subtracts those from your weekly target before applying the same equation.
+The weekly result estimates when you can reach the entire weekly target, even if that is beyond today.
+
+### Paychex
+
+1. Open Paychex, sign in, and open the extension with Paychex mode selected.
+2. Navigate within Paychex to load its timecard again, then click Refresh from Paychex.
+3. Select Day or Week and set your paid-hours target.
+4. Leave the manual clock-in checkbox off to use today's earliest captured clock-in.
+   Enable it only to override that with today's first clock-in.
+5. Enter only additional unpaid minutes still planned; captured unpaid time is included automatically.
 
 ## Calculation notes
 
-- Weekly totals use regular and overtime durations from the captured timecard, excluding entries marked as non-work.
-- A detected or manually entered current shift can contribute elapsed time to the estimate.
-- Manual mode assumes the running shift is not already included in recorded paid time. Confirm this against Paychex before relying on the result.
-- Enter only unpaid break minutes that remain, rather than your total breaks for the day.
-- Results are estimates, not official payroll totals. Verify Paychex rounding and your employer's payroll policies.
+Both modes use: projected clock-out = first clock-in + today's paid target + total unpaid time.
+Time until projected clock-out = projected clock-out minus now, with a minimum of zero.
+The projection stays at the calculated time after the target has been reached.
+
+Paychex uses today's earliest valid clock-in. It estimates unpaid time as the larger of
+reported unpaid duration and gaps between captured punches, avoiding double-counting lunch.
+It adds your additional planned unpaid minutes. This is a heuristic: incomplete records,
+paid gaps, or unpaid deductions separate from punch gaps can produce an inaccurate estimate.
+Paychex targets remain extension settings, not values extracted from the timecard.
+
+Weekly Paychex mode sums recorded regular and overtime seconds before today, excluding
+non-work and exact duplicate rows. Manual weekly mode uses your entered earlier paid hours.
+Today's paid target is the weekly target minus earlier paid hours, with a minimum of zero.
+Manual daily mode does not use stored recorded hours. Daily and weekly targets remain separate.
+
+Open the gear icon to replace the calculator view with Settings. Settings appear in this order:
+Mode, Calculate for, Weekly target, Daily target, and Time units, followed by Week starts.
+Week starts is always visible. Use the back arrow beside the Settings title (or Escape) to return. Changes save automatically.
+
+Time units apply to targets, earlier paid time, unpaid time, and duration results.
+Choose decimal Hours (for example, 0.5 or 0.87) or Minutes. Clock-in and clock-out remain clock times.
+Switching units converts the current amount: 0.5 hours = 30 minutes; 0.87 hours = 52.2 minutes.
+The selected unit is remembered. Switching units converts all duration inputs without changing
+the projected clock-out. Stored targets and earlier paid time remain hours; stored unpaid values
+remain minutes for compatibility. The previous unpaid-unit preference is used until a global
+time-unit preference is saved.
+
+Manual total-unpaid minutes and Paychex additional-unpaid minutes are saved separately.
+The old remaining-break setting is retained for Paychex; Manual total unpaid time starts at zero.
+Always check today's clock-in and break inputs: saved settings do not reset automatically each day.
+The equation assumes all other elapsed time is paid and does not apply payroll rounding,
+overtime premiums, or automatic clock-in/out actions. Overnight manual shifts are not supported.
+Results are estimates; verify your employer's payroll policies.
 
 ## Privacy and permissions
 

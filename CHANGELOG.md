@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.4.0
+
+- feat: added a settings page and updated the math
+
 ## 0.3.0
 
 - feat: made a clear separation from manual mode and from each of the integrations
