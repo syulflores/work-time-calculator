@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Work Time Calculator",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Read-only work hours calculator to see what time you need to clock out by.",
   "permissions": [
     "activeTab",

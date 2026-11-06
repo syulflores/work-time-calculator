@@ -11,6 +11,15 @@ semver_init() {
     test ! -f "$state/config" || config=$state/config
     test -f "$config" || fail 'Missing .githooks/semver.conf.'
     . "$config"
+    version_field=${version_field-}
+    case "$version_field" in *'{version}'*)
+        case "$version_field" in
+            *'
+'*) fail 'version_field must fit on one line.' ;;
+        esac
+        pattern_tail=${version_field#*\{version\}}
+        case "$pattern_tail" in *'{version}'*) fail 'version_field requires exactly one {version} placeholder.' ;; esac
+    ;; esac
     auto_continue=${auto_continue-true}
     case "$auto_continue" in true|false) ;; *) fail 'auto_continue must be true or false.' ;; esac
     commit_version=${commit_version-false}
@@ -25,7 +34,7 @@ semver_init() {
     for path in "$version_file" "$changelog_file"; do
         case "$path" in ''|/*|../*|*/../*|*/..|.git|.git/*|*\\*|[A-Za-z]:*) fail 'Managed paths must stay inside the repository, outside .git.' ;; esac
     done
-    case "$version_field" in *[!a-zA-Z0-9_-]*) fail 'Use a simple JSON field name.' ;; esac
+    case "$version_field" in *'{version}'*) ;; *[!a-zA-Z0-9_-]*) fail 'Use a simple JSON field name or a template containing {version}.' ;; esac
 }
 
 semver_lock() {
@@ -91,9 +100,32 @@ load_tracking() {
 }
 
 version() {
-    if test -z "$version_field"; then
+    case "$version_field" in *'{version}'*)
+        SEMVER_VERSION_PATTERN=$version_field SEMVER_VERSION_REPLACEMENT=${1:-} awk -v BINMODE=3 '
+            BEGIN {
+                pattern=ENVIRON["SEMVER_VERSION_PATTERN"]
+                pos=index(pattern,"{version}")
+                prefix=substr(pattern,1,pos-1); suffix=substr(pattern,pos+9)
+                replacement=ENVIRON["SEMVER_VERSION_REPLACEMENT"]
+            }
+            {
+                line=$0; sub(/\r$/, "", line)
+                size=length(line)-length(prefix)-length(suffix)
+                if(size>0 && substr(line,1,length(prefix))==prefix &&
+                    substr(line,length(line)-length(suffix)+1)==suffix) {
+                    candidate=substr(line,length(prefix)+1,size)
+                    if(candidate ~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) {
+                        count++; value=candidate
+                        if(replacement) $0=prefix replacement suffix (sub(/\r$/, "", $0) ? "\r" : "")
+                    }
+                }
+                if(replacement) print
+            }
+            END {if(count!=1) exit 1; if(!replacement) print value}
+        '
+    ;; '')
         if test "$#" -eq 0; then tr -d '\r\n'; else printf '%s\n' "$1"; fi
-    else
+    ;; *)
         awk -v field="$version_field" -v replacement="${1:-}" '
             {sub(/\r$/, "")}
             $0 ~ "^[[:space:]]*\"" field "\"[[:space:]]*:" {
@@ -104,7 +136,7 @@ version() {
             replacement {print}
             END {if(count!=1) exit 1; if(!replacement) print value}
         '
-    fi
+    ;; esac
 }
 
 next_version() {
@@ -317,7 +349,7 @@ strip_tree() (
     done
     if test "${preserve_version:-false}" != true && test -n "$version_field" && git cat-file -e "$original:$version_file" 2>/dev/null; then
         if git show "$metadata:$version_file" > "$state/strip-baseline" 2>/dev/null; then
-            previous_version=$(version < "$state/strip-baseline") || fail 'Cannot restore the JSON release baseline.'
+            previous_version=$(version < "$state/strip-baseline") || fail 'Cannot restore the embedded release baseline.'
         else previous_version=$initial_version; fi
         git show "$original:$version_file" > "$state/strip-version"
         version "$previous_version" < "$state/strip-version" > "$state/stripped-version"
@@ -382,9 +414,9 @@ prepare_release() {
     elif test -z "$version_field"; then
         printf '%s\n' "$old" > "$state/version"
     else
-        fail 'Commit the JSON version source before releasing.'
+        fail 'Commit the embedded version source before releasing.'
     fi
-    current=$(version < "$state/version") || fail 'Expected exactly one standalone JSON version field.'
+    current=$(version < "$state/version") || fail 'Expected exactly one matching version field or pattern.'
     manual_version=$current
     preserve_version=false
     preserve_changelog=false
@@ -539,7 +571,7 @@ prepare_release() {
         test -f "$changelog_file" || fail 'Restore the manually edited changelog before releasing.'
         cp "$changelog_file" "$state/new-changelog"
     fi
-    version "$next" < "$state/version" > "$state/new-version"
+    version "$next" < "$state/version" > "$state/new-version" || fail 'Cannot update the version source.'
     commit_message HEAD > "$state/commit-message"
     if test "$commit_version" = true; then
         SEMVER_RELEASE_TAG=$release_tag awk '

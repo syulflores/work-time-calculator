@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.4.1
+
+- fix: updated semver hooks
+
 ## 0.4.0
 
 - feat: added a settings page and updated the math
