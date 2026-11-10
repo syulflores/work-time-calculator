@@ -2,12 +2,17 @@
   if (window.__workTimeRelayV1) return;
   const source = window.__workTimeSource;
   if (!source) return;
+  if (!globalThis.chrome?.runtime?.id || !globalThis.chrome?.storage?.local) return;
   let active = true;
   function stop() {
     active = false;
     window.removeEventListener("message", onCapture);
-    chrome.runtime.onMessage.removeListener(onRequest);
-    chrome.storage.onChanged.removeListener(onModeChange);
+    try {
+      chrome.runtime?.onMessage?.removeListener(onRequest);
+      chrome.storage?.onChanged?.removeListener(onModeChange);
+    } catch {
+      // Extension updates can invalidate the APIs before cleanup runs.
+    }
     window.postMessage({ channel: CHANNEL, type: "stop" }, location.origin);
     delete window.__workTimeRelayV1;
   }
@@ -45,7 +50,7 @@
     latest.set(capture.source, capture);
     try {
       if (!chrome.runtime?.id || !chrome.storage?.local) {
-        window.removeEventListener("message", onCapture);
+        stop();
         return;
       }
       chrome.storage.local.set({ ["capturedTimecard:" + capture.source]: capture }).catch((error) => {
@@ -53,7 +58,7 @@
       });
     } catch (error) {
       if (error.message?.includes("Extension context invalidated")) {
-        window.removeEventListener("message", onCapture);
+        stop();
         return;
       }
       console.error("Unable to save captured timecard:", error);
@@ -73,10 +78,21 @@
       return;
     }
     const key = "capturedTimecard:" + msg.source;
-    chrome.storage.local.get(key).then((saved) => {
-      const stored = saved[key];
-      respond(isTimecardCapture(stored) && stored.source === msg.source ? stored : missing);
-    }).catch((error) => respond({ error: "Unable to read captured timecard: " + error.message }));
+    try {
+      if (!chrome.runtime?.id || !chrome.storage?.local) {
+        respond({ error: "Extension context unavailable. Reload your timecard page, then click Refresh." });
+        stop();
+        return;
+      }
+      chrome.storage.local.get(key).then((saved) => {
+        const stored = saved[key];
+        respond(isTimecardCapture(stored) && stored.source === msg.source ? stored : missing);
+      }).catch((error) => respond({ error: "Unable to read captured timecard: " + error.message }));
+    } catch (error) {
+      respond({ error: "Unable to read captured timecard: " + error.message });
+      stop();
+      return;
+    }
     return true;
   }
   chrome.runtime.onMessage.addListener(onRequest);
