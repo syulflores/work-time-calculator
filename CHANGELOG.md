@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.4.3
+
+- fix: hid the check box for the clock in time in manual mode since that will always be needed
+
 ## 0.4.2
 
 - fix: fixed error in relay

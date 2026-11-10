@@ -56,6 +56,8 @@ function refresh() {
   $("refresh").disabled = false;
   $("manualSettings").hidden = !isManual() || isDaily();
   updateUnpaidInput();
+  $("manualEnabled").hidden = isManual();
+  $("manualIn").required = isManual();
   $("refresh").textContent = isManual() ? "Recalculate" : "Refresh from Paychex";
   $("foot").textContent = isManual()
     ? "The estimate is not an official payroll total. This extension does not clock you in or out."
@@ -148,7 +150,7 @@ function calculate() {
   const takenUnpaid = Math.max(gap, reportedUnpaid);
   const enteredUnpaid = unpaidMinutes() * 60;
   const totalUnpaid = isManual() ? enteredUnpaid : takenUnpaid + enteredUnpaid;
-  const manual = $("manualEnabled").checked ? clockMinutes($("manualIn").value) : null;
+  const manual = isManual() || $("manualEnabled").checked ? clockMinutes($("manualIn").value) : null;
   const manualStart = manual === null ? null : new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(manual / 60), manual % 60).getTime();
   const start = manualStart ?? (isManual() ? null : punches[0]?.in ?? null);
   const validStart = start !== null && start <= nowMs;
