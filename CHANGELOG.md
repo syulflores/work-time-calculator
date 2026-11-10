@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.7.2
+
+- fix: replaced chevron with svg so it can align better
+
 ## 0.7.1
 
 - fix: updated styling and added dark mode

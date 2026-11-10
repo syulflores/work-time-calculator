@@ -163,7 +163,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 .icon-button:hover { background: var(--soft-hover); border-color: var(--field-hover-border); }
-#closeSettings { font-size: 28px; }
+#closeSettings svg { display: block; width: 20px; height: 20px; }
 
 #status {
   position: relative;
