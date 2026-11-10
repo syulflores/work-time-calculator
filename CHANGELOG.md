@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.5.0
+
+- feat: added override for unpaid hours
+
 ## 0.4.3
 
 - fix: hid the check box for the clock in time in manual mode since that will always be needed

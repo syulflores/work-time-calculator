@@ -27,7 +27,9 @@ const unpaidMinutes = () => Math.max(0, Number($("break").value) || 0) *
 function updateUnpaidInput() {
   const hours = $("timeUnit").value === "hours";
   const unit = hours ? "hours" : "minutes";
-  $("breakLabel").textContent = `${isManual() ? "Total unpaid time today" : "Additional unpaid time planned"} (${unit})`;
+  $("breakLabel").textContent = `Total unpaid time today (${unit})`;
+  $("unpaidOverride").hidden = isManual();
+  $("break").disabled = !isManual() && !$("unpaidOverride").checked;
   $("break").max = hours ? "8" : "480";
   $("break").value = Number((Number(unpaidValues[$("mode").value]) / (hours ? 60 : 1)).toFixed(10));
 }
@@ -149,7 +151,10 @@ function calculate() {
   // Reported unpaid time and punch gaps can represent the same lunch.
   const takenUnpaid = Math.max(gap, reportedUnpaid);
   const enteredUnpaid = unpaidMinutes() * 60;
-  const totalUnpaid = isManual() ? enteredUnpaid : takenUnpaid + enteredUnpaid;
+  const totalUnpaid = isManual() || $("unpaidOverride").checked ? enteredUnpaid : takenUnpaid;
+  if (!isManual() && !$("unpaidOverride").checked) {
+    $("break").value = displayNumber(takenUnpaid / unitSeconds());
+  }
   const manual = isManual() || $("manualEnabled").checked ? clockMinutes($("manualIn").value) : null;
   const manualStart = manual === null ? null : new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(manual / 60), manual % 60).getTime();
   const start = manualStart ?? (isManual() ? null : punches[0]?.in ?? null);
@@ -162,7 +167,8 @@ function calculate() {
   $("detail").textContent =
     (isDaily() ? "" : "Earlier paid time: " + fmt(previous) + ". ") +
     (isManual() ? "Include all unpaid breaks for today, taken or planned. " :
-      "Estimated unpaid time: " + fmt(takenUnpaid) + ". Add only planned breaks. ") +
+      "Received unpaid time: " + fmt(takenUnpaid) + ". " +
+      ($("unpaidOverride").checked ? "Using your total unpaid time override. " : "Check the box to override. ")) +
     (start !== null && !validStart ? "Clock-in must not be in the future. " : "") +
     (data.warning || "");
 }
@@ -237,6 +243,8 @@ async function refreshPaychex() {
     "paychexAdditionalUnpaid",
     "manualIn",
     "manualEnabled",
+    "unpaidOverride",
+    "paychexUnpaidOverride",
   ]);
   for (const [value, mode] of Object.entries(modes)) {
     const option = document.createElement("option");
@@ -261,7 +269,8 @@ async function refreshPaychex() {
   });
   if (saved.start != null) $("start").value = saved.start;
   unpaidValues.manual = saved.manualTotalUnpaid ?? "0";
-  unpaidValues.paychex = saved.paychexAdditionalUnpaid ?? saved.break ?? "0";
+  unpaidValues.paychex = saved.paychexUnpaidOverride ?? "0";
+  $("unpaidOverride").checked = !!saved.unpaidOverride;
   $("timeUnit").value = (saved.timeUnit ?? saved.breakUnit) === "hours" ? "hours" : "minutes";
   function updateTimeInputs() {
     const unit = $("timeUnit").value;
@@ -299,7 +308,7 @@ async function refreshPaychex() {
       if (key === "break") {
         value = unpaidMinutes();
         unpaidValues[$("mode").value] = value;
-        storageKey = isManual() ? "manualTotalUnpaid" : "paychexAdditionalUnpaid";
+        storageKey = isManual() ? "manualTotalUnpaid" : "paychexUnpaidOverride";
       }
       chrome.storage.local.set({ [storageKey]: value });
       calculate();
@@ -317,6 +326,11 @@ async function refreshPaychex() {
   $("closeSettings").addEventListener("click", () => showSettings(false));
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !$("settingsPage").hidden) showSettings(false);
+  });
+  $("unpaidOverride").addEventListener("change", () => {
+    chrome.storage.local.set({ unpaidOverride: $("unpaidOverride").checked });
+    updateUnpaidInput();
+    calculate();
   });
   if (saved.manualIn) $("manualIn").value = saved.manualIn;
   $("manualEnabled").checked = !!saved.manualEnabled;

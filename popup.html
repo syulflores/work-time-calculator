@@ -32,10 +32,13 @@
       </label>
     </section>
     <section class="settings">
-      <label
-        ><span id="breakLabel">Total unpaid time today (minutes)</span>
-        <input id="break" type="number" min="0" max="480" step="any" value="0"
-      /></label>
+      <div class="clock-in-row">
+        <input id="unpaidOverride" type="checkbox" hidden
+          aria-label="Override Paychex unpaid time"
+          title="Override Paychex unpaid time" />
+        <label for="break" id="breakLabel">Total unpaid time today (minutes)</label>
+        <input id="break" type="number" min="0" max="480" step="any" value="0" />
+      </div>
 
     </section>
     <div class="metrics">
