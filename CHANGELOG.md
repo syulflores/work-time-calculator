@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.6.0
+
+- feat: fully fixed paychex implementation to work
+
 ## 0.5.0
 
 - feat: added override for unpaid hours

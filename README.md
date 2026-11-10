@@ -40,11 +40,11 @@ The weekly result estimates when you can reach the entire weekly target, even if
 ### Paychex
 
 1. Open Paychex, sign in, and open the extension with Paychex mode selected.
-2. Navigate within Paychex to load its timecard again, then click Refresh from Paychex.
+2. Reload the Paychex timecard page, then click Refresh from Paychex. Capture stays enabled across page reloads while Paychex mode is selected.
 3. Select Day or Week and set your paid-hours target.
 4. Leave the manual clock-in checkbox off to use today's earliest captured clock-in.
    Enable it only to override that with today's first clock-in.
-5. Enter only additional unpaid minutes still planned; captured unpaid time is included automatically.
+5. Captured unpaid time fills the unpaid input automatically. To change it, enable the override and enter the total unpaid time for today, including planned breaks.
 
 ## Calculation notes
 
@@ -54,7 +54,7 @@ The projection stays at the calculated time after the target has been reached.
 
 Paychex uses today's earliest valid clock-in. It estimates unpaid time as the larger of
 reported unpaid duration and gaps between captured punches, avoiding double-counting lunch.
-It adds your additional planned unpaid minutes. This is a heuristic: incomplete records,
+The unpaid override replaces that estimate with your entered total. This is a heuristic: incomplete records,
 paid gaps, or unpaid deductions separate from punch gaps can produce an inaccurate estimate.
 Paychex targets remain extension settings, not values extracted from the timecard.
 
@@ -75,8 +75,7 @@ the projected clock-out. Stored targets and earlier paid time remain hours; stor
 remain minutes for compatibility. The previous unpaid-unit preference is used until a global
 time-unit preference is saved.
 
-Manual total-unpaid minutes and Paychex additional-unpaid minutes are saved separately.
-The old remaining-break setting is retained for Paychex; Manual total unpaid time starts at zero.
+Manual and Paychex total-unpaid overrides are saved separately.
 Always check today's clock-in and break inputs: saved settings do not reset automatically each day.
 The equation assumes all other elapsed time is paid and does not apply payroll rounding,
 overtime premiums, or automatic clock-in/out actions. Overnight manual shifts are not supported.
@@ -96,7 +95,7 @@ Settings and the latest captured timecard are stored locally using Chrome extens
 ## Troubleshooting
 
 - **No Paychex tab found:** Open the supported Paychex site and sign in before refreshing the extension.
-- **No timecard captured:** Open the extension first to initialize capture, then make Paychex load its timecard data again. After a full page reload, reopen the extension to initialize capture before navigating within Paychex to load timecard data.
+- **No timecard captured:** Select Paychex mode in the extension once, reload the Paychex timecard page, then click Refresh from Paychex.
 - **Old totals:** Check the capture time shown in the popup. Load updated timecard data in Paychex, then click **Refresh from Paychex**.
 - **Clock-out unavailable:** Enter today's clock-in and enable manual mode. The estimate requires a clock-in in the past and less than 24 hours old.
 
@@ -125,6 +124,7 @@ with `window.postMessage(message, location.origin)`:
   channel: "work-time-capture-v1",
   type: "capture",
   schemaVersion: 1,
+  normalizationVersion: 2, // Paychex punch wall-clock conversion revision.
   source: "paychex", // Stable provider identifier, e.g. "paylocity".
   at: 1793692800000, // Capture timestamp: Unix milliseconds.
   entries: [{
@@ -142,15 +142,19 @@ with `window.postMessage(message, location.origin)`:
 
 Send one row per top-level timecard group; do not also emit its detail rows.
 Durations must be finite nonnegative numbers. An empty entries array is valid.
+Paychex .NET punch dates encode wall-clock components; the bridge reconstructs those
+components in the browser's local timezone. Use the same timezone as your Paychex
+timecard. Payroll dates remain calendar labels. Captures from the old punch
+conversion are rejected; reload the timecard to replace them after upgrading.
 `relay.js` owns validation of incoming and stored captures; the popup uses normalized dates and
-numeric timestamps without parsing provider-specific date formats.
+numeric timestamps without parsing provider-specific date formats. The relay filters the requested period and converts records into calculation inputs: `firstClockIn` (milliseconds or null), `previousPaid` (seconds), `totalUnpaid` (seconds), and `todayRecords`. Daily mode uses only today; weekly mode also totals paid time before today.
 
 Load `relay.js` in the isolated world before loading the
 provider bridge in the main world. The relay accepts same-window, same-origin
 capture messages and stores each provider separately under
 `capturedTimecard:<source>`. The popup requests the latest in-memory capture with
-`{ type: "WORK_TIME_READ", source: "paychex" }`, the relay falls back to that provider's
-validated stored capture. The response contains `schemaVersion`, `source`, `at`, and `entries`.
+`{ type: "WORK_TIME_READ", source: "paychex", periodMode: "day", today: "2026-11-10", first: "2026-11-10", last: "2026-11-10", now: Date.now() }`, the relay falls back to that provider's
+validated stored capture. The response contains `schemaVersion`, `source`, `at`, `entries`, and period-specific `inputs`.
 The relay retains the guard for invalidated extension contexts.
 
 To add another integration, implement its bridge, register its popup mode and
@@ -178,3 +182,5 @@ mode changes can stop its scripts as well.
 
 After upgrading from scripts without lifecycle support, reload existing Paychex
 tabs once to remove the previously injected scripts.
+
+Run the bridge/relay/popup fixture checks with `node tests/paychex.test.cjs`. These checks use simulated Paychex responses; they do not verify the live site.

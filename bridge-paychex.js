@@ -23,28 +23,49 @@
   window.addEventListener("message", onControl);
   const CHANNEL = "work-time-capture-v1";
   const timestamp = (value) => {
+    if (value === null || value === undefined || value === "") return null;
     const match = /\/Date\((-?\d+)/.exec(value || "");
-    return match ? Number(match[1]) : null;
+    const ms = match ? Number(match[1]) : typeof value === "number" ? value : Date.parse(value);
+    return Number.isSafeInteger(ms) && Math.abs(ms) <= 8640000000000000 ? ms : null;
   };
-  const seconds = (value) => Math.max(0, Number(value) || 0);
+  const punchTimestamp = (value) => {
+    const ms = timestamp(value);
+    if (ms === null || !/^\/Date\(/.test(String(value))) return ms;
+    // StratusTime serializes the displayed wall clock into .NET date UTC fields.
+    // Reconstruct that clock locally; treating the payload as an instant shifts
+    // a 09:24 Chicago punch to 03:24 during standard time.
+    const clock = new Date(ms);
+    return new Date(clock.getUTCFullYear(), clock.getUTCMonth(), clock.getUTCDate(),
+      clock.getUTCHours(), clock.getUTCMinutes(), clock.getUTCSeconds(), clock.getUTCMilliseconds()).getTime();
+  };
+  const seconds = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+  const payrollDate = (value) => {
+    // ISO payroll dates are calendar labels, not instants to shift into another zone.
+    const iso = /^(\d{4}-\d{2}-\d{2})(?:T|$)/.exec(value || "");
+    if (iso) return iso[1];
+    const ms = timestamp(value);
+    return ms === null ? null : new Date(ms).toISOString().slice(0, 10);
+  };
   function capture(url, text) {
     if (!active || !String(url).includes("/GetTimeCardData")) return;
     try {
-      const d = JSON.parse(text);
+      let d = typeof text === "string" ? JSON.parse(text) : text;
+      if (d?.d !== undefined) d = typeof d.d === "string" ? JSON.parse(d.d) : d.d;
       const rows = d?.TimecardData?.TimeCardData;
       if (!Array.isArray(rows)) return;
       const entries = rows.map((x) => ({
-        date: timestamp(x.ApplyToDate) === null ? null : new Date(timestamp(x.ApplyToDate)).toISOString().slice(0, 10),
-        in: timestamp(x.DateTimeIn),
-        out: timestamp(x.DateTimeOut),
+        date: payrollDate(x.ApplyToDate),
+        in: punchTimestamp(x.DateTimeIn),
+        out: punchTimestamp(x.DateTimeOut),
         regular: seconds(x.RegDurationSecs),
         ot: seconds(x.OTDurationSecs),
         unpaid: seconds(x.UnpaidDurationSecs),
-        nonwork: Boolean(x.IsNonWork),
-        payType: String(x.PayTyeName || ""),
-      }));
+        nonwork: x.IsNonWork === true || x.IsNonWork === 1 || x.IsNonWork === "true",
+        payType: String(x.PayTypeName || x.PayTyeName || ""),
+      })).filter((row) => row.date !== null);
+      if (rows.length && !entries.length) return;
       window.postMessage(
-        { channel: CHANNEL, type: "capture", schemaVersion: 1, source: "paychex", entries, at: Date.now() },
+        { channel: CHANNEL, type: "capture", schemaVersion: 1, normalizationVersion: 2, source: "paychex", entries, at: Date.now() },
         location.origin,
       );
     } catch {}
@@ -80,9 +101,9 @@
         if (
           this.status >= 200 &&
           this.status < 300 &&
-          typeof this.responseText === "string"
+          (this.responseType === "json" || this.responseType === "" || this.responseType === "text")
         )
-          capture(this.__paychexHoursUrl, this.responseText);
+          capture(this.__paychexHoursUrl, this.responseType === "json" ? this.response : this.responseText);
       };
       pending.set(this, handler);
       this.addEventListener("load", handler, { once: true });

@@ -72,6 +72,7 @@ function refresh() {
   integrationQueue = integrationQueue.catch(() => {}).then(async () => {
     if (requestId !== refreshId) return;
     try {
+      await configureCapture(mode);
       await stopIntegrations();
       if (requestId !== refreshId) return;
       await modes[mode].refresh();
@@ -81,6 +82,23 @@ function refresh() {
   });
   return integrationQueue;
 }
+// Capture at document_start so a full page reload does not lose the timecard response.
+async function configureCapture(mode) {
+  const ids = ["work-time-paychex-relay", "work-time-paychex-bridge"];
+  const installed = await chrome.scripting.getRegisteredContentScripts({ ids });
+  if (mode !== "paychex") {
+    if (installed.length) await chrome.scripting.unregisterContentScripts({ ids: installed.map((script) => script.id) });
+    return;
+  }
+  const scripts = [
+    { id: ids[0], js: ["relay.js"], world: "ISOLATED" },
+    { id: ids[1], js: ["bridge-paychex.js"], world: "MAIN" },
+  ].filter((script) => !installed.some((current) => current.id === script.id));
+  if (scripts.length) await chrome.scripting.registerContentScripts(scripts.map((script) => ({
+    ...script, matches: [modes.paychex.url], runAt: "document_start", persistAcrossSessions: true,
+  })));
+}
+
 // Stop installed integrations across all registered provider tabs before starting one.
 async function stopIntegrations() {
   const urls = Object.values(modes).map((mode) => mode.url).filter(Boolean);
@@ -125,31 +143,17 @@ function calculate() {
   const lastDay = new Date(end);
   lastDay.setDate(lastDay.getDate() - 1);
   const first = localDay(begin), last = localDay(lastDay);
-  const seen = new Set();
-  const entries = data.entries.filter((row) => {
-    const key = JSON.stringify(row);
-    if (row.nonwork || row.date < first || row.date > last || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  const paid = (row) => Math.max(0, Number(row.regular) || 0) + Math.max(0, Number(row.ot) || 0);
+  const inputs = data.inputs;
+  if (!isManual() && (!inputs || inputs.today !== today || inputs.first !== first || inputs.last !== last)) {
+    refresh();
+    return;
+  }
   const target = Math.max(0, Number(periodValues[$("periodMode").value].target) || 0) * 3600;
   const previous = isDaily() ? 0 : isManual()
     ? Math.max(0, Number($("manualHours").value) || 0) * unitSeconds()
-    : entries.filter((row) => row.date < today).reduce((sum, row) => sum + paid(row), 0);
+    : inputs.previousPaid;
   const todayTarget = Math.max(0, target - previous);
-  const rows = entries.filter((row) => row.date === today);
-  const punches = rows.filter((row) => Number.isFinite(row.in) && row.in <= nowMs)
-    .sort((a, b) => a.in - b.in);
-  let gap = 0, coveredUntil = null;
-  for (const row of punches) {
-    if (coveredUntil !== null && row.in > coveredUntil) gap += (row.in - coveredUntil) / 1000;
-    const finish = row.out === null ? nowMs : Math.min(nowMs, Math.max(row.in, row.out));
-    coveredUntil = Math.max(coveredUntil ?? row.in, finish);
-  }
-  const reportedUnpaid = rows.reduce((sum, row) => sum + row.unpaid, 0);
-  // Reported unpaid time and punch gaps can represent the same lunch.
-  const takenUnpaid = Math.max(gap, reportedUnpaid);
+  const takenUnpaid = isManual() ? 0 : inputs.totalUnpaid;
   const enteredUnpaid = unpaidMinutes() * 60;
   const totalUnpaid = isManual() || $("unpaidOverride").checked ? enteredUnpaid : takenUnpaid;
   if (!isManual() && !$("unpaidOverride").checked) {
@@ -157,7 +161,7 @@ function calculate() {
   }
   const manual = isManual() || $("manualEnabled").checked ? clockMinutes($("manualIn").value) : null;
   const manualStart = manual === null ? null : new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(manual / 60), manual % 60).getTime();
-  const start = manualStart ?? (isManual() ? null : punches[0]?.in ?? null);
+  const start = manualStart ?? (isManual() ? null : inputs.firstClockIn);
   const validStart = start !== null && start <= nowMs;
   const estimate = validStart ? shiftEstimate(start, todayTarget, totalUnpaid, nowMs) : null;
   $("worked").textContent = fmt(todayTarget);
@@ -203,11 +207,19 @@ async function refreshPaychex() {
       world: "MAIN",
     });
     if (requestId !== refreshId) return;
+    const now = new Date();
+    const begin = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (!isDaily()) begin.setDate(begin.getDate() - ((begin.getDay() - Number($("start").value) + 7) % 7));
+    const last = new Date(begin);
+    last.setDate(last.getDate() + (isDaily() ? 0 : 6));
     let r = await chrome.tabs.sendMessage(tab.id, {
       type: "WORK_TIME_READ",
+      periodMode: $("periodMode").value,
+      today: localDay(now), first: localDay(begin), last: localDay(last), now: now.getTime(),
       source: "paychex",
     });
-    if (!Array.isArray(r?.entries) || r.source !== "paychex")
+    if (r?.error) throw Error(r.error);
+    if (!Array.isArray(r?.entries) || r.source !== "paychex" || !r.inputs)
       throw Error(
         "No timecard captured. Leave Paychex open, reload its timecard page, and click Refresh again.",
       );
@@ -218,7 +230,7 @@ async function refreshPaychex() {
       new Date(r.at).toLocaleTimeString() +
       ". Reload the Paychex timecard to update.";
     $("status").textContent =
-      `Loaded ${r.entries.length} records from Paychex.`;
+      `Loaded ${isDaily() ? r.inputs.todayRecords : r.entries.length} records from Paychex.${r.inputs.todayRecords ? "" : " No records for today; open today's timecard in Paychex and refresh."}`;
     calculate();
   } catch (e) {
     if (requestId === refreshId) $("status").textContent = "Notice: " + e.message;

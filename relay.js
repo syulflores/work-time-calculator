@@ -1,6 +1,6 @@
 (() => {
   if (window.__workTimeRelayV1) return;
-  const source = window.__workTimeSource;
+  const source = window.__workTimeSource || "paychex";
   if (!source) return;
   if (!globalThis.chrome?.runtime?.id || !globalThis.chrome?.storage?.local) return;
   let active = true;
@@ -26,6 +26,7 @@
     const timestamp = (v) => v === null || (Number.isSafeInteger(v) && Math.abs(v) <= 8640000000000000);
     const seconds = (v) => Number.isFinite(v) && v >= 0;
     return value?.schemaVersion === 1 &&
+      (value.source !== "paychex" || value.normalizationVersion === 2) &&
       /^[a-z][a-z0-9-]*$/.test(value.source || "") &&
       Number.isSafeInteger(value.at) && value.at > 0 &&
       Array.isArray(value.entries) && value.entries.every((row) =>
@@ -46,7 +47,8 @@
       !isTimecardCapture(ev.data)
     )
       return;
-    const capture = { schemaVersion: 1, source: ev.data.source, entries: ev.data.entries, at: ev.data.at };
+    const capture = { schemaVersion: 1, normalizationVersion: ev.data.normalizationVersion,
+      source: ev.data.source, entries: ev.data.entries, at: ev.data.at };
     latest.set(capture.source, capture);
     try {
       if (!chrome.runtime?.id || !chrome.storage?.local) {
@@ -65,6 +67,38 @@
     }
   }
   window.addEventListener("message", onCapture);
+  function withInputs(capture, msg) {
+    const { today, first, last, now } = msg;
+    const day = /^\d{4}-\d{2}-\d{2}$/;
+    if (![today, first, last].every((value) => day.test(value || "")) ||
+        first > today || last < today || !Number.isSafeInteger(now) ||
+        !["day", "week"].includes(msg.periodMode))
+      return { error: "Invalid calculation period." };
+    const begin = msg.periodMode === "day" ? today : first;
+    const end = msg.periodMode === "day" ? today : last;
+    const seen = new Set();
+    const rows = capture.entries.filter((row) => {
+      const key = JSON.stringify(row);
+      if (row.nonwork || row.date < begin || row.date > end || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const daily = rows.filter((row) => row.date === today);
+    const punches = daily.filter((row) => row.in !== null && row.in <= now).sort((a, b) => a.in - b.in);
+    let gap = 0, coveredUntil = null;
+    for (const row of punches) {
+      if (coveredUntil !== null && row.in > coveredUntil) gap += (row.in - coveredUntil) / 1000;
+      const finish = row.out === null ? now : Math.min(now, Math.max(row.in, row.out));
+      coveredUntil = Math.max(coveredUntil ?? row.in, finish);
+    }
+    return { ...capture, inputs: {
+      today, first: begin, last: end,
+      firstClockIn: punches[0]?.in ?? null,
+      previousPaid: rows.filter((row) => row.date < today).reduce((sum, row) => sum + row.regular + row.ot, 0),
+      totalUnpaid: Math.max(gap, daily.reduce((sum, row) => sum + row.unpaid, 0)),
+      todayRecords: daily.length,
+    } };
+  }
   function onRequest(msg, sender, respond) {
     if (!active || msg?.type !== "WORK_TIME_READ") return;
     if (msg.source !== source) {
@@ -74,7 +108,7 @@
     const missing = { error: "No timecard captured. Reload your timecard page, then click Refresh." };
     const capture = latest.get(msg.source);
     if (capture) {
-      respond(capture);
+      respond(withInputs(capture, msg));
       return;
     }
     const key = "capturedTimecard:" + msg.source;
@@ -86,7 +120,7 @@
       }
       chrome.storage.local.get(key).then((saved) => {
         const stored = saved[key];
-        respond(isTimecardCapture(stored) && stored.source === msg.source ? stored : missing);
+        respond(isTimecardCapture(stored) && stored.source === msg.source ? withInputs(stored, msg) : missing);
       }).catch((error) => respond({ error: "Unable to read captured timecard: " + error.message }));
     } catch (error) {
       respond({ error: "Unable to read captured timecard: " + error.message });
