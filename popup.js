@@ -20,18 +20,33 @@ let refreshId = 0;
 let integrationQueue = Promise.resolve();
 const isManual = () => $("mode").value === "manual";
 const isDaily = () => $("periodMode").value === "day";
+function setStatus(message, error = false) {
+  $("status").textContent = message;
+  $("status").dataset.state = error ? "error" : "ok";
+}
 const unpaidValues = { manual: "0", paychex: "0" };
+const gatheredClockIn = () => !isManual() && Number.isFinite(data?.inputs?.firstClockIn) &&
+  Math.abs(data.inputs.firstClockIn) <= 8640000000000000 ? data.inputs.firstClockIn : null;
+const gatheredUnpaid = () => !isManual() && data?.inputs?.todayRecords > 0 &&
+  Number.isFinite(data.inputs.totalUnpaid) && data.inputs.totalUnpaid >= 0 ? data.inputs.totalUnpaid : null;
+const useClockInput = () => $("manualEnabled").checked || gatheredClockIn() === null;
+const useUnpaidInput = () => $("unpaidOverride").checked || gatheredUnpaid() === null;
 // Saved unpaid values remain minutes, regardless of the displayed unit.
 const unpaidMinutes = () => Math.max(0, Number($("break").value) || 0) *
   ($("timeUnit").value === "hours" ? 60 : 1);
-function updateUnpaidInput() {
+function updateUnpaidInput(restoreValue = true) {
   const hours = $("timeUnit").value === "hours";
   const unit = hours ? "hours" : "minutes";
-  $("breakLabel").textContent = `Total unpaid time today (${unit})`;
-  $("unpaidOverride").hidden = isManual();
-  $("break").disabled = !isManual() && !$("unpaidOverride").checked;
+  $("breakLabel").textContent = `Unpaid time (${unit})`;
+  $("unpaidOverrideLabel").hidden = isManual();
+  $("break").hidden = !useUnpaidInput();
+  $("break").disabled = false;
+  $("providerUnpaid").hidden = useUnpaidInput();
+  $("providerUnpaid").textContent = gatheredUnpaid() === null ? "?" : fmt(gatheredUnpaid());
   $("break").max = hours ? "8" : "480";
-  $("break").value = Number((Number(unpaidValues[$("mode").value]) / (hours ? 60 : 1)).toFixed(10));
+  if (restoreValue) {
+    $("break").value = Number((Number(unpaidValues[$("mode").value]) / (hours ? 60 : 1)).toFixed(10));
+  }
 }
 const periodValues = {
   week: { target: "40", manualHours: "0" },
@@ -41,25 +56,39 @@ const periodValues = {
 function updatePeriodSettings() {
   const values = periodValues[$("periodMode").value];
 
-  $("manualSettings").hidden = !isManual() || isDaily();
+  $("manualSettings").hidden = (!isManual() && !!data?.inputs) || isDaily();
 
   $("manualHours").value = displayNumber(Number(values.manualHours) * 3600 / unitSeconds());
 }
 
 function refreshManual() {
   data = { entries: [] };
-  $("status").textContent = "Manual mode: enter your first clock-in, target, and total unpaid time today.";
+  setStatus("Enter your first clock-in, target, and total unpaid time today.");
   calculate();
+}
+
+function updateClockInput() {
+  const manual = useClockInput();
+  $("clockOverrideLabel").hidden = isManual();
+  $("manualIn").hidden = !manual;
+  $("manualIn").required = manual;
+  $("providerClockIn").hidden = manual;
+  $("providerClockIn").textContent = gatheredClockIn() === null ? "?"
+    : new Date(gatheredClockIn()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function refresh() {
   refreshId++;
+  $("modeSubtitle").textContent = `Mode: ${modes[$("mode").value].label}`;
+  $("clockProviderHelp").hidden = isManual();
+  $("unpaidProviderHelp").hidden = isManual();
+  setStatus("Refreshing…");
   data = null;
   $("refresh").disabled = false;
-  $("manualSettings").hidden = !isManual() || isDaily();
+  $("manualSettings").hidden = isDaily();
   updateUnpaidInput();
-  $("manualEnabled").hidden = isManual();
-  $("manualIn").required = isManual();
+  updateClockInput();
+  $("providerClockIn").textContent = "?";
   $("refresh").textContent = isManual() ? "Recalculate" : "Refresh from Paychex";
   $("foot").textContent = isManual()
     ? "The estimate is not an official payroll total. This extension does not clock you in or out."
@@ -67,6 +96,7 @@ function refresh() {
   for (const id of ["worked", "remaining", "out"]) $(id).textContent = "?";
   $("period").textContent = "";
   $("detail").textContent = "";
+  calculate();
   const requestId = refreshId;
   const mode = $("mode").value;
   integrationQueue = integrationQueue.catch(() => {}).then(async () => {
@@ -77,7 +107,7 @@ function refresh() {
       if (requestId !== refreshId) return;
       await modes[mode].refresh();
     } catch (error) {
-      if (requestId === refreshId) $("status").textContent = "Notice: " + error.message;
+      if (requestId === refreshId) setStatus("Notice: " + error.message, true);
     }
   });
   return integrationQueue;
@@ -134,7 +164,9 @@ function shiftEstimate(start, target, unpaid, now) {
 }
 
 function calculate() {
-  if (!data) return;
+  updateClockInput();
+  updateUnpaidInput(false);
+  $("manualSettings").hidden = (!isManual() && !!data?.inputs) || isDaily();
   const now = new Date(), nowMs = now.getTime(), today = localDay(now);
   const begin = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   if (!isDaily()) begin.setDate(begin.getDate() - ((begin.getDay() - Number($("start").value) + 7) % 7));
@@ -143,25 +175,22 @@ function calculate() {
   const lastDay = new Date(end);
   lastDay.setDate(lastDay.getDate() - 1);
   const first = localDay(begin), last = localDay(lastDay);
-  const inputs = data.inputs;
-  if (!isManual() && (!inputs || inputs.today !== today || inputs.first !== first || inputs.last !== last)) {
+  const inputs = data?.inputs;
+  if (!isManual() && inputs && (inputs.today !== today || inputs.first !== first || inputs.last !== last)) {
     refresh();
     return;
   }
   const target = Math.max(0, Number(periodValues[$("periodMode").value].target) || 0) * 3600;
-  const previous = isDaily() ? 0 : isManual()
+  const previous = isDaily() ? 0 : isManual() || !inputs
     ? Math.max(0, Number($("manualHours").value) || 0) * unitSeconds()
     : inputs.previousPaid;
   const todayTarget = Math.max(0, target - previous);
-  const takenUnpaid = isManual() ? 0 : inputs.totalUnpaid;
+  const takenUnpaid = gatheredUnpaid();
   const enteredUnpaid = unpaidMinutes() * 60;
-  const totalUnpaid = isManual() || $("unpaidOverride").checked ? enteredUnpaid : takenUnpaid;
-  if (!isManual() && !$("unpaidOverride").checked) {
-    $("break").value = displayNumber(takenUnpaid / unitSeconds());
-  }
-  const manual = isManual() || $("manualEnabled").checked ? clockMinutes($("manualIn").value) : null;
+  const totalUnpaid = useUnpaidInput() ? enteredUnpaid : takenUnpaid;
+  const manual = useClockInput() ? clockMinutes($("manualIn").value) : null;
   const manualStart = manual === null ? null : new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(manual / 60), manual % 60).getTime();
-  const start = manualStart ?? (isManual() ? null : inputs.firstClockIn);
+  const start = useClockInput() ? manualStart : gatheredClockIn();
   const validStart = start !== null && start <= nowMs;
   const estimate = validStart ? shiftEstimate(start, todayTarget, totalUnpaid, nowMs) : null;
   $("worked").textContent = fmt(todayTarget);
@@ -171,17 +200,16 @@ function calculate() {
   $("detail").textContent =
     (isDaily() ? "" : "Earlier paid time: " + fmt(previous) + ". ") +
     (isManual() ? "Include all unpaid breaks for today, taken or planned. " :
-      "Received unpaid time: " + fmt(takenUnpaid) + ". " +
-      ($("unpaidOverride").checked ? "Using your total unpaid time override. " : "Check the box to override. ")) +
+      (takenUnpaid === null ? "Unpaid time unavailable. Using your entered total. " : "")) +
     (start !== null && !validStart ? "Clock-in must not be in the future. " : "") +
-    (data.warning || "");
+    (data?.warning || "");
 }
 
 async function refreshPaychex() {
   const requestId = refreshId;
   const btn = $("refresh");
   btn.disabled = true;
-  $("status").textContent = "Checking captured Paychex timecard…";
+  setStatus("Checking captured Paychex timecard…");
   try {
     const tabs = await chrome.tabs.query({
       url: "https://paychex.centralservers.com/*",
@@ -229,11 +257,13 @@ async function refreshPaychex() {
       "Data captured from Paychex at " +
       new Date(r.at).toLocaleTimeString() +
       ". Reload the Paychex timecard to update.";
-    $("status").textContent =
-      `Loaded ${isDaily() ? r.inputs.todayRecords : r.entries.length} records from Paychex.${r.inputs.todayRecords ? "" : " No records for today; open today's timecard in Paychex and refresh."}`;
+    setStatus(
+      `Loaded ${isDaily() ? r.inputs.todayRecords : r.entries.length} records from Paychex.${r.inputs.todayRecords ? "" : " No records for today; open today's timecard in Paychex and refresh."}`,
+      !r.inputs.todayRecords,
+    );
     calculate();
   } catch (e) {
-    if (requestId === refreshId) $("status").textContent = "Notice: " + e.message;
+    if (requestId === refreshId) setStatus("Notice: " + e.message, true);
   } finally {
     if (requestId === refreshId) btn.disabled = false;
   }
@@ -332,9 +362,37 @@ async function refreshPaychex() {
     $("closeSettings").hidden = !show;
     $("openSettings").setAttribute("aria-expanded", String(show));
     $("pageTitle").textContent = show ? "Settings" : "Work Time Left";
+    $("modeSubtitle").hidden = show;
     (show ? $("closeSettings") : $("openSettings")).focus();
   }
+  for (const [buttonId, helpId] of [["clockHelpButton", "clockHelp"], ["unpaidHelpButton", "unpaidHelp"]]) {
+    const button = $(buttonId), help = $(helpId);
+    let pinned = false;
+    const show = (visible) => {
+      help.hidden = !visible;
+      button.setAttribute("aria-expanded", String(visible));
+    };
+    button.addEventListener("mouseenter", () => {
+      if (window.matchMedia("(hover: hover)").matches) show(true);
+    });
+    button.addEventListener("mouseleave", () => { if (!pinned) show(false); });
+    button.addEventListener("click", () => { pinned = !pinned; show(pinned); });
+    button.addEventListener("blur", () => { pinned = false; show(false); });
+    document.addEventListener("click", (event) => {
+      if (!button.contains(event.target) && !help.contains(event.target)) {
+        pinned = false;
+        show(false);
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { pinned = false; show(false); }
+    });
+  }
   $("openSettings").addEventListener("click", () => showSettings(true));
+  $("editTarget").addEventListener("click", () => {
+    showSettings(true);
+    $(isDaily() ? "dailyTarget" : "weeklyTarget").focus();
+  });
   $("closeSettings").addEventListener("click", () => showSettings(false));
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !$("settingsPage").hidden) showSettings(false);

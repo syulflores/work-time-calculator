@@ -9,7 +9,10 @@
     <header>
       <div class="heading-row">
         <button id="closeSettings" class="icon-button" type="button" aria-label="Back to calculator" title="Back to calculator" hidden>&#8249;</button>
-        <h2 id="pageTitle">Work Time Left</h2>
+        <div class="heading-text">
+          <h2 id="pageTitle">Work Time Left</h2>
+          <p id="modeSubtitle">Mode: Manual</p>
+        </div>
         <button id="openSettings" class="icon-button" type="button" aria-label="Settings" title="Settings" aria-controls="settingsPage" aria-expanded="false">&#9881;&#65038;</button>
       </div>
     </header>
@@ -17,32 +20,42 @@
     <div id="status" role="status">
       Enter your recorded hours and clock-in below.
     </div>
-    <section class="settings">
-      <div class="clock-in-row">
-        <input id="manualEnabled" type="checkbox"
-          aria-label="Use this clock-in to estimate clock-out"
-          title="Use this clock-in to estimate clock-out" />
-        <label for="manualIn">First clock-in today</label>
-        <input id="manualIn" type="time" />
+    <section class="settings calculator-inputs">
+      <div class="input-row">
+        <div class="input-heading">
+          <label id="clockOverrideLabel" class="override-label" title="Manual override"><input id="manualEnabled" type="checkbox" aria-label="Manual clock-in override" /></label>
+          <div class="field-label">
+            <label for="manualIn">Clock-in</label>
+            <button id="clockHelpButton" class="info-button" type="button" aria-label="About clock-in" aria-expanded="false" aria-controls="clockHelp">&#9432;</button>
+          </div>
+        </div>
+        <p id="clockHelp" class="field-help" hidden>Your first clock-in today.<span id="clockProviderHelp" hidden> Uses the gathered time when available; otherwise, enter it yourself. Check the checkbox for a manual override to use your own time instead.</span></p>
+        <div class="input-value">
+          <input id="manualIn" type="time" />
+          <span id="providerClockIn">?</span>
+        </div>
       </div>
-    </section>
-    <section class="settings" id="manualSettings">
-      <label><span id="manualHoursLabel">Paid time before today (hours)</span>
-        <input id="manualHours" type="number" min="0" step="any" value="0" />
-      </label>
-    </section>
-    <section class="settings">
-      <div class="clock-in-row">
-        <input id="unpaidOverride" type="checkbox" hidden
-          aria-label="Override Paychex unpaid time"
-          title="Override Paychex unpaid time" />
-        <label for="break" id="breakLabel">Total unpaid time today (minutes)</label>
-        <input id="break" type="number" min="0" max="480" step="any" value="0" />
+      <div class="input-row">
+        <div class="input-heading">
+          <label id="unpaidOverrideLabel" class="override-label" title="Manual override" hidden><input id="unpaidOverride" type="checkbox" aria-label="Manual unpaid time override" /></label>
+          <div class="field-label">
+            <label for="break" id="breakLabel">Unpaid time (minutes)</label>
+            <button id="unpaidHelpButton" class="info-button" type="button" aria-label="About unpaid time" aria-expanded="false" aria-controls="unpaidHelp">&#9432;</button>
+          </div>
+        </div>
+        <p id="unpaidHelp" class="field-help" hidden>Total unpaid time today, including taken or planned breaks.<span id="unpaidProviderHelp" hidden> Uses the gathered total when available; otherwise, enter it yourself. Check the checkbox for a manual override to enter your own total, including any planned breaks.</span></p>
+        <div class="input-value">
+          <input id="break" type="number" min="0" max="480" step="any" value="0" />
+          <span id="providerUnpaid">?</span>
+        </div>
       </div>
-
+      <div class="input-row">
+        <div class="input-heading"><span>Paid target today</span></div>
+        <button id="editTarget" class="settings-link" type="button">Set this in settings</button>
+        <span id="worked">?</span>
+      </div>
     </section>
     <div class="metrics">
-      <div><small>Paid target today</small><strong id="worked">—</strong></div>
       <div>
         <small>Time until projected clock-out</small><strong id="remaining">—</strong>
       </div>
@@ -67,6 +80,9 @@
         </label>
         <label><span id="dailyTargetLabel">Daily target (hours)</span>
           <input id="dailyTarget" type="number" min="0" max="24" step="any" value="8" />
+        </label>
+        <label id="manualSettings"><span id="manualHoursLabel">Paid time before today (hours)</span>
+          <input id="manualHours" type="number" min="0" step="any" value="0" />
         </label>
         <label>Time units
           <select id="timeUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option></select>

@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.7.0
+
+- feat: full restructure of the extension
+
 ## 0.6.0
 
 - feat: fully fixed paychex implementation to work
