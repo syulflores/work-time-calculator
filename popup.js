@@ -196,7 +196,7 @@ function calculate() {
   $("worked").textContent = fmt(todayTarget);
   $("remaining").textContent = estimate ? fmt(estimate.remaining) : "?";
   $("out").textContent = estimate ? dateTime(estimate.out) : "Enter today's clock-in";
-  $("period").textContent = isDaily() ? "Day: " + today : "Workweek: " + first + " through " + last;
+  $("period").textContent = isDaily() ? "" : "Workweek: " + first + " through " + last;
   $("detail").textContent =
     (isDaily() ? "" : "Earlier paid time: " + fmt(previous) + ". ") +
     (isManual() ? "Include all unpaid breaks for today, taken or planned. " :
@@ -254,8 +254,11 @@ async function refreshPaychex() {
     if (requestId !== refreshId) return;
     data = r;
     data.warning =
-      "Data captured from Paychex at " +
-      new Date(r.at).toLocaleTimeString() +
+      "Data captured from Paychex on " +
+      new Date(r.at).toLocaleString([], {
+        weekday: "short", year: "numeric", month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit", second: "2-digit",
+      }) +
       ". Reload the Paychex timecard to update.";
     setStatus(
       `Loaded ${isDaily() ? r.inputs.todayRecords : r.entries.length} records from Paychex.${r.inputs.todayRecords ? "" : " No records for today; open today's timecard in Paychex and refresh."}`,
@@ -271,6 +274,7 @@ async function refreshPaychex() {
 
 (async () => {
   const saved = await chrome.storage.local.get([
+    "darkMode",
     "mode",
     "periodMode",
     "dailyTarget",
@@ -288,6 +292,21 @@ async function refreshPaychex() {
     "unpaidOverride",
     "paychexUnpaidOverride",
   ]);
+  function applyTheme(dark) {
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    $("darkMode").checked = dark;
+    try {
+      localStorage.setItem("darkMode", String(dark));
+    } catch {
+      // Saving in chrome.storage still works without the optional paint cache.
+    }
+  }
+  applyTheme(saved.darkMode === true);
+  $("darkMode").addEventListener("change", () => {
+    const dark = $("darkMode").checked;
+    applyTheme(dark);
+    chrome.storage.local.set({ darkMode: dark });
+  });
   for (const [value, mode] of Object.entries(modes)) {
     const option = document.createElement("option");
     option.value = value;
@@ -368,12 +387,17 @@ async function refreshPaychex() {
   for (const [buttonId, helpId] of [["clockHelpButton", "clockHelp"], ["unpaidHelpButton", "unpaidHelp"]]) {
     const button = $(buttonId), help = $(helpId);
     let pinned = false;
+    let hoverTimer;
     const show = (visible) => {
+      clearTimeout(hoverTimer);
       help.hidden = !visible;
       button.setAttribute("aria-expanded", String(visible));
     };
     button.addEventListener("mouseenter", () => {
-      if (window.matchMedia("(hover: hover)").matches) show(true);
+      if (!pinned && window.matchMedia("(hover: hover)").matches) {
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => show(true), 1000);
+      }
     });
     button.addEventListener("mouseleave", () => { if (!pinned) show(false); });
     button.addEventListener("click", () => { pinned = !pinned; show(pinned); });

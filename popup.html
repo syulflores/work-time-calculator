@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <script src="theme.js"></script>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -23,7 +24,7 @@
     <section class="settings calculator-inputs">
       <div class="input-row">
         <div class="input-heading">
-          <label id="clockOverrideLabel" class="override-label" title="Manual override"><input id="manualEnabled" type="checkbox" aria-label="Manual clock-in override" /></label>
+          <label id="clockOverrideLabel" class="override-label" data-tooltip="Manual override"><input id="manualEnabled" type="checkbox" aria-label="Manual clock-in override" /></label>
           <div class="field-label">
             <label for="manualIn">Clock-in</label>
             <button id="clockHelpButton" class="info-button" type="button" aria-label="About clock-in" aria-expanded="false" aria-controls="clockHelp">&#9432;</button>
@@ -37,7 +38,7 @@
       </div>
       <div class="input-row">
         <div class="input-heading">
-          <label id="unpaidOverrideLabel" class="override-label" title="Manual override" hidden><input id="unpaidOverride" type="checkbox" aria-label="Manual unpaid time override" /></label>
+          <label id="unpaidOverrideLabel" class="override-label" data-tooltip="Manual override" hidden><input id="unpaidOverride" type="checkbox" aria-label="Manual unpaid time override" /></label>
           <div class="field-label">
             <label for="break" id="breakLabel">Unpaid time (minutes)</label>
             <button id="unpaidHelpButton" class="info-button" type="button" aria-label="About unpaid time" aria-expanded="false" aria-controls="unpaidHelp">&#9432;</button>
@@ -56,10 +57,10 @@
       </div>
     </section>
     <div class="metrics">
-      <div>
+      <div class="metric-result">
         <small>Time until projected clock-out</small><strong id="remaining">—</strong>
       </div>
-      <div><small>Projected clock-out</small><strong id="out">—</strong></div>
+      <div class="metric-result"><small>Projected clock-out</small><strong id="out">—</strong></div>
     </div>
     <p id="period"></p>
     <p id="detail"></p>
@@ -71,6 +72,7 @@
     </main>
     <section id="settingsPage" hidden aria-label="Calculator settings">
       <div class="settings">
+        <label for="darkMode">Dark mode<input id="darkMode" class="theme-switch" type="checkbox" role="switch" /></label>
         <label>Mode<select id="mode" aria-label="Calculator mode"></select></label>
         <label>Calculate for
           <select id="periodMode"><option value="week">Week</option><option value="day">Day</option></select>
