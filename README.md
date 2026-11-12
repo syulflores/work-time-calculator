@@ -28,14 +28,22 @@ No build step or additional dependencies are required. Microsoft Edge can also l
 
 1. Open Settings using the gear, select Manual and Day, and set your target and time units.
    Return with the back arrow beside the Settings title.
-2. Enter your first clock-in today; enable the clock-in checkbox.
+2. Enter your first clock-in today.
 3. Enter total unpaid minutes for today, including lunch already taken and any planned unpaid breaks.
 4. Review the projected clock-out and time until that projection (including unpaid time).
 
 For example: 8:00 AM + 8 paid hours + 30 unpaid minutes = 4:30 PM.
-Daily mode needs no recorded-hours input. For Week, enter paid hours completed before today;
-the calculator subtracts those from your weekly target before applying the same equation.
-The weekly result estimates when you can reach the entire weekly target, even if that is beyond today.
+Daily mode needs no recorded-hours input. For Week, the calculator shows seven dated columns starting on your configured week start,
+with Clock-in and Unpaid rows. Enter today's values in today's column. You can also enter
+other days; future values set the planned clock-in and unpaid time for those days. Manual mode adds the paid targets for earlier days in the grid and subtracts that total
+from the weekly target. Adjust those past values to match the paid hours you actually worked.
+The weekly projection allocates remaining paid hours across weekdays using the daily target.
+Blank future weekdays use today's clock-in and unpaid time. An entered weekend clock-in
+includes that day in the plan. If the target exceeds planned hours in the current week,
+the calculator reports that instead of extending one shift overnight.
+
+Weekly inputs are saved separately by provider and calendar date; a new week starts with blank
+clock-ins and zero unpaid time. Daily inputs remain separate.
 
 ### Paychex
 
@@ -45,6 +53,11 @@ The weekly result estimates when you can reach the entire weekly target, even if
 4. Leave the manual clock-in checkbox off to use today's earliest captured clock-in.
    Enable it only to override that with today's first clock-in.
 5. Captured unpaid time fills the unpaid input automatically. To change it, enable the override and enter the total unpaid time for today, including planned breaks.
+
+In Week mode, captured clock-in and unpaid values appear for each available day. Each field
+has its own manual override checkbox. Missing fields are editable without checking an override;
+zero captured unpaid time is a valid value. Prior paid time still comes from the timecard,
+so overriding a past clock-in or unpaid value does not change recorded paid totals.
 
 ## Calculation notes
 
@@ -59,19 +72,19 @@ paid gaps, or unpaid deductions separate from punch gaps can produce an inaccura
 Paychex targets remain extension settings, not values extracted from the timecard.
 
 Weekly Paychex mode sums recorded regular and overtime seconds before today, excluding
-non-work and exact duplicate rows. Manual weekly mode uses your entered earlier paid hours.
-Today's paid target is the weekly target minus earlier paid hours, with a minimum of zero.
+non-work and exact duplicate rows. Manual weekly mode totals the paid targets for earlier days in the displayed week.
+Remaining weekly paid time is the weekly target minus earlier paid hours, with a minimum of zero.
 Manual daily mode does not use stored recorded hours. Daily and weekly targets remain separate.
 
 Open the gear icon to replace the calculator view with Settings. Settings appear in this order:
 Mode, Calculate for, Weekly target, Daily target, and Time units, followed by Week starts.
 Week starts is always visible. Use the back arrow beside the Settings title (or Escape) to return. Changes save automatically.
 
-Time units apply to targets, earlier paid time, unpaid time, and duration results.
+Time units apply to targets, unpaid time, and duration results.
 Choose decimal Hours (for example, 0.5 or 0.87) or Minutes. Clock-in and clock-out remain clock times.
 Switching units converts the current amount: 0.5 hours = 30 minutes; 0.87 hours = 52.2 minutes.
 The selected unit is remembered. Switching units converts all duration inputs without changing
-the projected clock-out. Stored targets and earlier paid time remain hours; stored unpaid values
+the projected clock-out. Stored global targets remain hours; stored unpaid values
 remain minutes for compatibility. The previous unpaid-unit preference is used until a global
 time-unit preference is saved.
 
@@ -184,3 +197,20 @@ After upgrading from scripts without lifecycle support, reload existing Paychex
 tabs once to remove the previously injected scripts.
 
 Run the bridge/relay/popup fixture checks with `node tests/paychex.test.cjs`. These checks use simulated Paychex responses; they do not verify the live site.
+
+Weekly grid and per-day relay checks: `node tests/weekly.test.cjs`.
+
+Weekly mode includes an editable **Paid target** row in the selected duration units.
+Weekdays default to the daily target, and weekends default to zero. Set a day's target
+to zero to skip it, or clear it to restore its default. Targets save by date and provider.
+Changing today's or a future day's target redistributes the remaining weekly hours;
+for example, planning nine paid hours Thursday instead of eight moves Friday's finish
+one hour earlier. In Manual mode, past targets count as completed paid hours. Integrations continue to use recorded earlier paid totals.
+
+The **Countdown** setting defaults to **Working hours**, which shows remaining paid
+work across planned shifts and excludes overnight gaps and unpaid duration. Choose
+**Elapsed time** to show all time until the same projected clock-out, including breaks
+and nights. This preference is saved and applies to Day and Week in every mode.
+Because break start/end times are not available to the planner, working time uses
+elapsed shift time minus the day's total unpaid duration, clamped to the paid target.
+If that total includes a planned break not yet taken, the working countdown is an estimate.

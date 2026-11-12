@@ -142,10 +142,13 @@ button {
 button:hover { background: var(--accent-dark); }
 button:disabled { opacity: 0.55; cursor: wait; }
 
-button:focus-visible, input:focus-visible, select:focus-visible {
+button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
+
+input:focus, select:focus { outline: none; }
+input:not([type="checkbox"]):focus-visible, select:focus-visible { background: var(--soft-hover); }
 
 .icon-button {
   display: grid;
@@ -206,6 +209,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 .settings input:hover, .settings select:hover { border-color: var(--field-hover-border); }
 .settings input:focus, .settings select:focus { background: var(--surface); }
+.settings input:not([type="checkbox"]):focus-visible, .settings select:focus-visible { background: var(--soft-hover); }
 input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 
 .calculator-inputs {
@@ -390,7 +394,12 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 #period { font-weight: 600; color: var(--period); }
 #period:empty, #detail:empty { display: none; }
 #refresh {
-  margin-top: 7px;
+  flex: 0 0 112px;
+  width: 112px;
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.3;
   border-color: var(--refresh-border);
   background: var(--refresh-background);
   color: var(--accent-dark);
@@ -443,3 +452,19 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }
 }
+.weekly, .weekly body { width: 780px; min-width: 780px; }
+.week-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+#weekTable { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
+#weekTable th, #weekTable td { padding: 9px 4px; text-align: center; border-bottom: 1px solid var(--line); }
+#weekTable tr:last-child td, #weekTable tbody tr:last-child th { border-bottom: 0; }
+#weekTable th { font-weight: 600; }
+#weekTable th:first-child { width: 78px; text-align: left; padding-left: 9px; }
+#weekTable small { display: block; color: var(--muted); font-weight: 400; }
+#weekTable .today { background: var(--result-background); color: var(--accent-dark); }
+.week-value { display: flex; flex-wrap: nowrap; align-items: center; justify-content: center; gap: 4px; min-height: 38px; }
+.week-value input:not([type="checkbox"]) { width: 100%; min-width: 0; padding: 5px 2px; border: 1px solid var(--field-border); border-radius: 5px; background: var(--field); color: var(--ink); font-size: 11px; }
+.week-value input[type="checkbox"] { flex-shrink: 0; width: 13px; height: 13px; margin: 0; }
+.week-value input[type="checkbox"] + input { flex: 1; width: 0; }
+.week-value input[type="checkbox"] + span { flex: 1; min-width: 0; text-align: center; overflow-wrap: anywhere; }
+.week-value input[type="checkbox"] + input { text-align: center; }
+.week-value input:not([type="checkbox"]):focus-visible { background: var(--soft-hover); }

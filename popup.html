@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html class="weekly">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -14,17 +14,18 @@
           <h2 id="pageTitle">Work Time Left</h2>
           <p id="modeSubtitle">Mode: Manual</p>
         </div>
+        <button id="refresh" type="button">Recalculate</button>
         <button id="openSettings" class="icon-button" type="button" aria-label="Settings" title="Settings" aria-controls="settingsPage" aria-expanded="false">&#9881;&#65038;</button>
       </div>
     </header>
     <main id="calculatorPage">
     <div id="status" role="status">
-      Enter your recorded hours and clock-in below.
+      Enter your clock-in, paid targets, and total unpaid time for the week.
     </div>
-    <section class="settings calculator-inputs">
+    <section id="dailyInputs" class="settings calculator-inputs" hidden>
       <div class="input-row">
         <div class="input-heading">
-          <label id="clockOverrideLabel" class="override-label" data-tooltip="Manual override"><input id="manualEnabled" type="checkbox" aria-label="Manual clock-in override" /></label>
+          <label id="clockOverrideLabel" class="override-label" hidden data-tooltip="Manual override"><input id="manualEnabled" type="checkbox" aria-label="Manual clock-in override" /></label>
           <div class="field-label">
             <label for="manualIn">Clock-in</label>
             <button id="clockHelpButton" class="info-button" type="button" aria-label="About clock-in" aria-expanded="false" aria-controls="clockHelp">&#9432;</button>
@@ -32,8 +33,8 @@
         </div>
         <p id="clockHelp" class="field-help" hidden>Your first clock-in today.<span id="clockProviderHelp" hidden> Uses the gathered time when available; otherwise, enter it yourself. Check the checkbox for a manual override to use your own time instead.</span></p>
         <div class="input-value">
-          <input id="manualIn" type="time" />
-          <span id="providerClockIn">?</span>
+          <input id="manualIn" type="time" required />
+          <span id="providerClockIn" hidden>?</span>
         </div>
       </div>
       <div class="input-row">
@@ -47,33 +48,32 @@
         <p id="unpaidHelp" class="field-help" hidden>Total unpaid time today, including taken or planned breaks.<span id="unpaidProviderHelp" hidden> Uses the gathered total when available; otherwise, enter it yourself. Check the checkbox for a manual override to enter your own total, including any planned breaks.</span></p>
         <div class="input-value">
           <input id="break" type="number" min="0" max="480" step="any" value="0" />
-          <span id="providerUnpaid">?</span>
+          <span id="providerUnpaid" hidden>?</span>
         </div>
       </div>
       <div class="input-row">
         <div class="input-heading"><span>Paid target today</span></div>
         <button id="editTarget" class="settings-link" type="button">Set this in settings</button>
-        <span id="worked">?</span>
+        <span id="worked">480 minutes</span>
       </div>
     </section>
+    <section id="weeklyInputs" aria-label="Weekly time inputs"><div class="week-scroll"><table id="weekTable"></table></div><p id="weekHelp" class="foot"></p></section>
     <div class="metrics">
       <div class="metric-result">
-        <small>Time until projected clock-out</small><strong id="remaining">—</strong>
+        <small id="remainingLabel">Working time until projected clock-out</small><strong id="remaining">?</strong>
       </div>
-      <div class="metric-result"><small>Projected clock-out</small><strong id="out">—</strong></div>
+      <div class="metric-result"><small>Projected clock-out</small><strong id="out">Enter today's clock-in</strong></div>
     </div>
     <p id="period"></p>
     <p id="detail"></p>
-    <button id="refresh">Refresh from Paychex</button>
     <p class="foot" id="foot">
-      Read-only. The estimate is not an official payroll total. Keep Paychex
-      open and signed in. This extension does not clock you in or out.
+      The estimate is not an official payroll total. This extension does not clock you in or out.
     </p>
     </main>
     <section id="settingsPage" hidden aria-label="Calculator settings">
       <div class="settings">
         <label for="darkMode">Dark mode<input id="darkMode" class="theme-switch" type="checkbox" role="switch" /></label>
-        <label>Mode<select id="mode" aria-label="Calculator mode"></select></label>
+        <label>Mode<select id="mode" aria-label="Calculator mode"><option value="manual" selected>Manual</option></select></label>
         <label>Calculate for
           <select id="periodMode"><option value="week">Week</option><option value="day">Day</option></select>
         </label>
@@ -83,17 +83,17 @@
         <label><span id="dailyTargetLabel">Daily target (hours)</span>
           <input id="dailyTarget" type="number" min="0" max="24" step="any" value="8" />
         </label>
-        <label id="manualSettings"><span id="manualHoursLabel">Paid time before today (hours)</span>
-          <input id="manualHours" type="number" min="0" step="any" value="0" />
-        </label>
         <label>Time units
           <select id="timeUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option></select>
+        </label>
+        <label>Countdown
+          <select id="countdownMode"><option value="working">Working hours</option><option value="elapsed">Elapsed time</option></select>
         </label>
         <label id="weekStartSetting">Week starts
           <select id="start"><option value="0">Sunday</option><option value="1">Monday</option><option value="6">Saturday</option></select>
         </label>
       </div>
-      <p class="foot">Time units apply to targets, paid time, unpaid time, and duration results. Clock times keep their usual format. Settings save automatically.</p>
+      <p class="foot">Time units apply to targets, unpaid time, and duration results. Clock times keep their usual format. Settings save automatically.</p>
     </section>
     <script src="popup.js"></script>
   </body>

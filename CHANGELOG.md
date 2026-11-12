@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.8.0
+
+- feat: fully restructured the weekly mode and how it is displayed
+
 ## 0.7.2
 
 - fix: replaced chevron with svg so it can align better

@@ -49,21 +49,15 @@ function updateUnpaidInput(restoreValue = true) {
   }
 }
 const periodValues = {
-  week: { target: "40", manualHours: "0" },
-  day: { target: "8", manualHours: "0" },
+  week: { target: "40" },
+  day: { target: "8" },
 };
-
-function updatePeriodSettings() {
-  const values = periodValues[$("periodMode").value];
-
-  $("manualSettings").hidden = (!isManual() && !!data?.inputs) || isDaily();
-
-  $("manualHours").value = displayNumber(Number(values.manualHours) * 3600 / unitSeconds());
-}
 
 function refreshManual() {
   data = { entries: [] };
-  setStatus("Enter your first clock-in, target, and total unpaid time today.");
+  setStatus(isDaily()
+    ? "Enter your first clock-in, target, and total unpaid time today."
+    : "Enter your clock-in, paid targets, and total unpaid time for the week.");
   calculate();
 }
 
@@ -77,15 +71,21 @@ function updateClockInput() {
     : new Date(gatheredClockIn()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-function refresh() {
+function refresh(requestAccess = false) {
+  const mode = $("mode").value;
+  // Request immediately from the click/change handler to preserve the user gesture.
+  const access = mode === "manual" ? Promise.resolve(true)
+    : (requestAccess
+      ? chrome.permissions.request({ origins: [modes[mode].url] })
+      : chrome.permissions.contains({ origins: [modes[mode].url] }))
+      .catch((error) => ({ error }));
   refreshId++;
   $("modeSubtitle").textContent = `Mode: ${modes[$("mode").value].label}`;
   $("clockProviderHelp").hidden = isManual();
   $("unpaidProviderHelp").hidden = isManual();
-  setStatus("Refreshing…");
+  setStatus(isManual() ? "Recalculating..." : "Refreshing...");
   data = null;
   $("refresh").disabled = false;
-  $("manualSettings").hidden = isDaily();
   updateUnpaidInput();
   updateClockInput();
   $("providerClockIn").textContent = "?";
@@ -98,12 +98,32 @@ function refresh() {
   $("detail").textContent = "";
   calculate();
   const requestId = refreshId;
-  const mode = $("mode").value;
   integrationQueue = integrationQueue.catch(() => {}).then(async () => {
     if (requestId !== refreshId) return;
     try {
-      await configureCapture(mode);
-      await stopIntegrations();
+      if (mode === "paychex") {
+        const tabs = await chrome.tabs.query({ url: modes[mode].url });
+        if (requestId !== refreshId) return;
+        if (!tabs.length) {
+          setStatus("Open Paychex, sign in, and open your timecard, then click Refresh from Paychex.", true);
+          return;
+        }
+      }
+      const granted = await access;
+      if (granted?.error) throw granted.error;
+      if (!granted) {
+        if (requestId === refreshId) setStatus("Paychex site access is required. Click Refresh from Paychex and allow access. If access stays blocked, enable it in Chrome's extension settings under Site access.", true);
+        return;
+      }
+      if (requestId !== refreshId) return;
+      if (mode === "manual") {
+        // Cleanup must not block manual calculations.
+        await configureCapture(mode).catch(() => {});
+      } else {
+        await configureCapture(mode);
+      }
+      // A stale or inaccessible tab must not block reading another provider tab.
+      await stopIntegrations().catch(() => {});
       if (requestId !== refreshId) return;
       await modes[mode].refresh();
     } catch (error) {
@@ -157,16 +177,156 @@ const clockMinutes = (s) => {
   return h < 24 && m < 60 ? h * 60 + m : null;
 };
 
+// Break timing is unavailable: subtract the entered total from elapsed shift time.
+function remainingPaid(start, paid, unpaid, now) {
+  const worked = Math.max(0, (now - start) / 1000 - unpaid);
+  return Math.max(0, paid - worked);
+}
+const countdownSeconds = (estimate) => $("countdownMode").value === "elapsed" ? estimate.remaining : estimate.workingRemaining;
+
 // Both modes supply inputs to the same clock-out equation.
 function shiftEstimate(start, target, unpaid, now) {
   const out = start + (target + unpaid) * 1000;
-  return { out, remaining: Math.max(0, (out - now) / 1000) };
+  return { out, remaining: Math.max(0, (out - now) / 1000), workingRemaining: remainingPaid(start, target, unpaid, now) };
+}
+
+// Allocate remaining paid time to scheduled days rather than one continuous shift.
+function weeklyEstimate(start, target, unpaid, now, dailyTarget, dates, dayPlan) {
+  let left = target;
+  const today = localDay(new Date(start));
+  let lastOut = null;
+  let workingRemaining = 0;
+  for (const date of dates) {
+    const key = localDay(date);
+    if (key < today) continue;
+    const plan = dayPlan(key);
+    const explicitStart = plan.clock !== null;
+    const dayTarget = plan.paidTarget ?? dailyTarget;
+    if (dayTarget <= 0) continue;
+    if (key !== today && !explicitStart && plan.paidTarget == null && (date.getDay() === 0 || date.getDay() === 6)) continue;
+    const clock = key === today ? new Date(start) : new Date(date);
+    if (key !== today) {
+      const fallback = new Date(start);
+      const minutes = explicitStart ? plan.clock : fallback.getHours() * 60 + fallback.getMinutes();
+      clock.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+    }
+    const paid = Math.min(left, dayTarget);
+    const dayUnpaid = key === today ? unpaid : plan.unpaid ?? unpaid;
+    workingRemaining += remainingPaid(clock.getTime(), paid, dayUnpaid, now);
+    lastOut = clock.getTime() + (paid + dayUnpaid) * 1000;
+    left -= paid;
+    if (left <= 0) return { out: lastOut, remaining: Math.max(0, (lastOut - now) / 1000), workingRemaining };
+  }
+  return null;
+}
+
+let weeklyValues = {};
+function weekDates() {
+  const first = new Date();
+  first.setHours(0, 0, 0, 0);
+  first.setDate(first.getDate() - ((first.getDay() - Number($("start").value) + 7) % 7));
+  return Array.from({ length: 7 }, (_, i) => {
+    const date = new Date(first); date.setDate(date.getDate() + i); return date;
+  });
+}
+function weeklyField(date, field) {
+  const saved = weeklyValues[$("mode").value]?.[date] || {};
+  const gathered = isManual() ? null : data?.inputs?.days?.[date]?.[field];
+  const manual = isManual() || saved[field + "Override"] === true || !Number.isFinite(gathered);
+  return { saved, manual, value: manual ? saved[field] ?? (field === "totalUnpaid" ? 0 : "") : gathered };
+}
+function weeklyPaidTarget(date) {
+  const key = localDay(date);
+  const values = weeklyValues[$("mode").value]?.[key] || {};
+  const recorded = !isManual() && key < localDay(new Date()) && data?.inputs
+    ? data.inputs.days?.[key]?.paidSeconds ?? 0 : null;
+  if (recorded !== null && values.paidTargetOverride !== true) return recorded;
+  const saved = values.paidTarget;
+  if (Number.isFinite(saved) && saved >= 0) return saved;
+  if (recorded !== null) return recorded;
+  return date.getDay() === 0 || date.getDay() === 6 ? 0 : Math.max(0, Number(periodValues.day.target) || 0) * 3600;
+}
+function weeklyPreviousPaid(dates, today) {
+  return dates.filter((date) => localDay(date) < today)
+    .reduce((total, date) => total + weeklyPaidTarget(date), 0);
+}
+function renderWeek() {
+  $("dailyInputs").hidden = !isDaily();
+  $("weeklyInputs").hidden = isDaily();
+  document.documentElement.classList.toggle("weekly", !isDaily());
+  if (isDaily()) return;
+  const dates = weekDates(), table = $("weekTable");
+  table.replaceChildren();
+  const header = table.createTHead().insertRow();
+  const corner = document.createElement("th"); corner.textContent = "Day"; header.append(corner);
+  for (const date of dates) {
+    const th = document.createElement("th"); th.scope = "col";
+    th.textContent = date.toLocaleDateString([], { weekday: "short" });
+    const small = document.createElement("small");
+    small.textContent = date.toLocaleDateString([], { month: "numeric", day: "numeric" }); th.append(small);
+    if (localDay(date) === localDay(new Date())) th.className = "today";
+    header.append(th);
+  }
+  const body = table.createTBody();
+  for (const [field, label] of [["firstClockIn", "Clock-in"], ["totalUnpaid", "Unpaid"], ["paidTarget", isManual() ? "Paid target" : "Paid hours / target"]]) {
+    const row = body.insertRow(), heading = document.createElement("th"); heading.scope = "row";
+    heading.textContent = label + (field !== "firstClockIn" ? ` (${$("timeUnit").value})` : ""); row.append(heading);
+    for (const date of dates) {
+      const key = localDay(date), state = weeklyField(key, field), cell = row.insertCell();
+      const wrap = document.createElement("div"); wrap.className = "week-value";
+      const name = `${date.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })} ${label}`;
+      const save = (property, value) => {
+        const mode = $("mode").value;
+        weeklyValues[mode] ??= {}; weeklyValues[mode][key] ??= {};
+        weeklyValues[mode][key][property] = value;
+        chrome.storage.local.set({ weeklyValues }); calculate();
+      };
+      if (field === "paidTarget") {
+        if (!isManual()) {
+          const check = document.createElement("input"); check.type = "checkbox";
+          check.checked = state.saved.paidTargetOverride === true;
+          check.title = "Manual override"; check.setAttribute("aria-label", `Manual override: ${name}`);
+          check.addEventListener("change", () => save("paidTargetOverride", check.checked)); wrap.append(check);
+          if (!check.checked) {
+            const value = document.createElement("span"); value.textContent = fmt(weeklyPaidTarget(date));
+            wrap.append(value); cell.append(wrap); continue;
+          }
+        }
+        const input = document.createElement("input");
+        input.type = "number"; input.min = "0"; input.step = "any";
+        input.setAttribute("aria-label", `${name} (${$("timeUnit").value})`);
+        input.value = displayNumber(weeklyPaidTarget(date) / unitSeconds());
+        input.title = "Planned paid time. Set 0 for a day off; clear to use the default.";
+        input.addEventListener("change", () => save(field, input.value === "" ? null : Math.max(0, Number(input.value) || 0) * unitSeconds()));
+        wrap.append(input); cell.append(wrap); continue;
+      }
+      if (!isManual()) {
+        const check = document.createElement("input"); check.type = "checkbox";
+        check.checked = state.saved[field + "Override"] === true;
+        check.title = "Manual override"; check.setAttribute("aria-label", `Manual override: ${name}`);
+        check.addEventListener("change", () => save(field + "Override", check.checked)); wrap.append(check);
+      }
+      if (state.manual) {
+        const input = document.createElement("input"); input.type = field === "firstClockIn" ? "time" : "number";
+        input.setAttribute("aria-label", name);
+        if (field === "totalUnpaid") { input.min = "0"; input.step = "any"; }
+        input.value = field === "totalUnpaid" ? displayNumber(Number(state.value) * 60 / unitSeconds()) : state.value;
+        input.addEventListener("change", () => save(field, field === "totalUnpaid" ? Math.max(0, Number(input.value) || 0) * unitSeconds() / 60 : input.value)); wrap.append(input);
+      } else {
+        const value = document.createElement("span");
+        value.textContent = field === "firstClockIn" ? new Date(state.value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : fmt(state.value); wrap.append(value);
+      }
+      cell.append(wrap);
+    }
+  }
+  $("weekHelp").textContent = "Projection uses each remaining day's paid target. Set 0 for a day off; clear to restore the default. " + (isManual()
+    ? "Past paid targets count as completed paid time. "
+    : "Completed days show recorded regular and overtime hours; today and future days show planned targets. Check a paid-hours field to override it. ") + "Blank future days use today's clock-in and unpaid time; enter planned values to change them." + (isManual() ? "" : " Check a field to override it; enter missing values directly.");
 }
 
 function calculate() {
   updateClockInput();
   updateUnpaidInput(false);
-  $("manualSettings").hidden = (!isManual() && !!data?.inputs) || isDaily();
   const now = new Date(), nowMs = now.getTime(), today = localDay(now);
   const begin = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   if (!isDaily()) begin.setDate(begin.getDate() - ((begin.getDay() - Number($("start").value) + 7) % 7));
@@ -181,21 +341,34 @@ function calculate() {
     return;
   }
   const target = Math.max(0, Number(periodValues[$("periodMode").value].target) || 0) * 3600;
-  const previous = isDaily() ? 0 : isManual() || !inputs
-    ? Math.max(0, Number($("manualHours").value) || 0) * unitSeconds()
-    : inputs.previousPaid;
+  const previous = isDaily() ? 0 : weeklyPreviousPaid(weekDates(), today);
   const todayTarget = Math.max(0, target - previous);
+  renderWeek();
+  const weekClock = weeklyField(today, "firstClockIn"), weekUnpaid = weeklyField(today, "totalUnpaid");
   const takenUnpaid = gatheredUnpaid();
   const enteredUnpaid = unpaidMinutes() * 60;
-  const totalUnpaid = useUnpaidInput() ? enteredUnpaid : takenUnpaid;
-  const manual = useClockInput() ? clockMinutes($("manualIn").value) : null;
+  const totalUnpaid = !isDaily() ? Number(weekUnpaid.value) * (weekUnpaid.manual ? 60 : 1) : useUnpaidInput() ? enteredUnpaid : takenUnpaid;
+  const manual = !isDaily() ? (weekClock.manual ? clockMinutes(weekClock.value) : null) : useClockInput() ? clockMinutes($("manualIn").value) : null;
   const manualStart = manual === null ? null : new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(manual / 60), manual % 60).getTime();
-  const start = useClockInput() ? manualStart : gatheredClockIn();
+  const start = !isDaily() ? (weekClock.manual ? manualStart : weekClock.value) : useClockInput() ? manualStart : gatheredClockIn();
   const validStart = start !== null && start <= nowMs;
-  const estimate = validStart ? shiftEstimate(start, todayTarget, totalUnpaid, nowMs) : null;
+  const dailyTarget = Math.max(0, Number(periodValues.day.target) || 0) * 3600;
+  const estimate = !validStart ? null : isDaily()
+    ? shiftEstimate(start, todayTarget, totalUnpaid, nowMs)
+    : weeklyEstimate(start, todayTarget, totalUnpaid, nowMs, dailyTarget, weekDates(), (date) => {
+      const clock = weeklyField(date, "firstClockIn"), unpaid = weeklyField(date, "totalUnpaid");
+      const hasUnpaid = !unpaid.manual || Object.hasOwn(unpaid.saved, "totalUnpaid");
+      return {
+        clock: clock.manual ? clockMinutes(clock.value) : new Date(clock.value).getHours() * 60 + new Date(clock.value).getMinutes(),
+        paidTarget: weeklyPaidTarget(new Date(date + "T00:00:00")),
+        unpaid: hasUnpaid ? Number(unpaid.value) * (unpaid.manual ? 60 : 1) : null,
+      };
+    });
   $("worked").textContent = fmt(todayTarget);
-  $("remaining").textContent = estimate ? fmt(estimate.remaining) : "?";
-  $("out").textContent = estimate ? dateTime(estimate.out) : "Enter today's clock-in";
+  $("remainingLabel").textContent = $("countdownMode").value === "elapsed"
+    ? "Time until projected clock-out" : "Working time until projected clock-out";
+  $("remaining").textContent = estimate ? fmt(countdownSeconds(estimate)) : "?";
+  $("out").textContent = estimate ? dateTime(estimate.out) : validStart && !isDaily() ? "Target exceeds this week's planned hours" : "Enter today's clock-in";
   $("period").textContent = isDaily() ? "" : "Workweek: " + first + " through " + last;
   $("detail").textContent =
     (isDaily() ? "" : "Earlier paid time: " + fmt(previous) + ". ") +
@@ -245,6 +418,11 @@ async function refreshPaychex() {
       periodMode: $("periodMode").value,
       today: localDay(now), first: localDay(begin), last: localDay(last), now: now.getTime(),
       source: "paychex",
+    }).catch((error) => {
+      if (/receiving end does not exist|could not establish connection/i.test(error.message)) {
+        throw Error("Open your Paychex timecard or reload it, then click Refresh from Paychex.");
+      }
+      throw error;
     });
     if (r?.error) throw Error(r.error);
     if (!Array.isArray(r?.entries) || r.source !== "paychex" || !r.inputs)
@@ -274,12 +452,12 @@ async function refreshPaychex() {
 
 (async () => {
   const saved = await chrome.storage.local.get([
+    "countdownMode",
+    "weeklyValues",
     "darkMode",
     "mode",
     "periodMode",
     "dailyTarget",
-    "dailyManualHours",
-    "manualHours",
     "start",
     "target",
     "break",
@@ -301,12 +479,19 @@ async function refreshPaychex() {
       // Saving in chrome.storage still works without the optional paint cache.
     }
   }
+  $("countdownMode").value = saved.countdownMode === "elapsed" ? "elapsed" : "working";
+  $("countdownMode").addEventListener("change", () => {
+    chrome.storage.local.set({ countdownMode: $("countdownMode").value });
+    calculate();
+  });
+  weeklyValues = saved.weeklyValues || {};
   applyTheme(saved.darkMode === true);
   $("darkMode").addEventListener("change", () => {
     const dark = $("darkMode").checked;
     applyTheme(dark);
     chrome.storage.local.set({ darkMode: dark });
   });
+  $("mode").replaceChildren();
   for (const [value, mode] of Object.entries(modes)) {
     const option = document.createElement("option");
     option.value = value;
@@ -316,16 +501,13 @@ async function refreshPaychex() {
   $("mode").value = Object.hasOwn(modes, saved.mode) ? saved.mode : "manual";
   $("mode").addEventListener("change", () => {
     chrome.storage.local.set({ mode: $("mode").value });
-    refresh();
+    refresh(true);
   });
   periodValues.week.target = saved.target ?? "40";
-  periodValues.week.manualHours = saved.manualHours ?? "0";
   periodValues.day.target = saved.dailyTarget ?? "8";
-  periodValues.day.manualHours = saved.dailyManualHours ?? "0";
   $("periodMode").value = saved.periodMode === "day" ? "day" : "week";
   $("periodMode").addEventListener("change", () => {
     chrome.storage.local.set({ periodMode: $("periodMode").value });
-    updatePeriodSettings();
     calculate();
   });
   if (saved.start != null) $("start").value = saved.start;
@@ -340,8 +522,6 @@ async function refreshPaychex() {
       $(id).max = max * 3600 / unitSeconds();
       $(id + "Label").textContent = (period === "week" ? "Weekly" : "Daily") + " target (" + unit + ")";
     }
-    $("manualHoursLabel").textContent = "Paid time before today (" + unit + ")";
-    updatePeriodSettings();
     updateUnpaidInput();
   }
   $("timeUnit").addEventListener("change", () => {
@@ -357,15 +537,10 @@ async function refreshPaychex() {
     });
   }
   updateTimeInputs();
-  for (const key of ["start", "break", "manualHours"])
+  for (const key of ["start", "break"])
     $(key).addEventListener("change", () => {
       let value = $(key).value;
       let storageKey = key;
-      if (key === "manualHours") {
-        value = Math.max(0, Number(value) || 0) * unitSeconds() / 3600;
-        periodValues[$("periodMode").value].manualHours = value;
-        storageKey = isDaily() ? "dailyManualHours" : "manualHours";
-      }
       if (key === "break") {
         value = unpaidMinutes();
         unpaidValues[$("mode").value] = value;
@@ -378,6 +553,7 @@ async function refreshPaychex() {
     $("calculatorPage").hidden = show;
     $("settingsPage").hidden = !show;
     $("openSettings").hidden = show;
+    $("refresh").hidden = show;
     $("closeSettings").hidden = !show;
     $("openSettings").setAttribute("aria-expanded", String(show));
     $("pageTitle").textContent = show ? "Settings" : "Work Time Left";
@@ -435,7 +611,9 @@ async function refreshPaychex() {
       });
       calculate();
     });
-  $("refresh").addEventListener("click", refresh);
+  $("refresh").addEventListener("click", () => refresh(true));
   refresh();
-  setInterval(calculate, 30000);
+  setInterval(() => {
+    if (!$("weekTable").contains(document.activeElement)) calculate();
+  }, 30000);
 })();

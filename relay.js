@@ -83,20 +83,29 @@
       seen.add(key);
       return true;
     });
-    const daily = rows.filter((row) => row.date === today);
-    const punches = daily.filter((row) => row.in !== null && row.in <= now).sort((a, b) => a.in - b.in);
-    let gap = 0, coveredUntil = null;
-    for (const row of punches) {
-      if (coveredUntil !== null && row.in > coveredUntil) gap += (row.in - coveredUntil) / 1000;
-      const finish = row.out === null ? now : Math.min(now, Math.max(row.in, row.out));
-      coveredUntil = Math.max(coveredUntil ?? row.in, finish);
+    function summarize(date) {
+      const daily = rows.filter((row) => row.date === date);
+      const punches = daily.filter((row) => row.in !== null && row.in <= now).sort((a, b) => a.in - b.in);
+      let gap = 0, coveredUntil = null;
+      for (const row of punches) {
+        if (coveredUntil !== null && row.in > coveredUntil) gap += (row.in - coveredUntil) / 1000;
+        const finish = row.out === null ? now : Math.min(now, Math.max(row.in, row.out));
+        coveredUntil = Math.max(coveredUntil ?? row.in, finish);
+      }
+      return { firstClockIn: punches[0]?.in ?? null,
+        paidSeconds: daily.reduce((sum, row) => sum + row.regular + row.ot, 0),
+        totalUnpaid: daily.length ? Math.max(gap, daily.reduce((sum, row) => sum + row.unpaid, 0)) : null,
+        records: daily.length };
     }
+    const days = Object.fromEntries([...new Set(rows.map((row) => row.date))].map((date) => [date, summarize(date)]));
+    const daily = summarize(today);
     return { ...capture, inputs: {
       today, first: begin, last: end,
-      firstClockIn: punches[0]?.in ?? null,
+      days,
+      firstClockIn: daily.firstClockIn,
       previousPaid: rows.filter((row) => row.date < today).reduce((sum, row) => sum + row.regular + row.ot, 0),
-      totalUnpaid: Math.max(gap, daily.reduce((sum, row) => sum + row.unpaid, 0)),
-      todayRecords: daily.length,
+      totalUnpaid: daily.totalUnpaid ?? 0,
+      todayRecords: daily.records,
     } };
   }
   function onRequest(msg, sender, respond) {
