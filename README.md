@@ -81,7 +81,7 @@ Mode, Calculate for, Weekly target, Daily target, and Time units, followed by We
 Week starts is always visible. Use the back arrow beside the Settings title (or Escape) to return. Changes save automatically.
 
 Time units apply to targets, unpaid time, and duration results.
-Choose decimal Hours (for example, 0.5 or 0.87) or Minutes. Clock-in and clock-out remain clock times.
+Choose decimal Hours (for example, 0.5 or 0.87) Minutes, or Hours:Minutes (for example, 8:30 for eight hours and thirty minutes). Hours:Minutes applies to duration inputs and results, rounded to the nearest minute. Clock-in and clock-out remain clock times.
 Switching units converts the current amount: 0.5 hours = 30 minutes; 0.87 hours = 52.2 minutes.
 The selected unit is remembered. Switching units converts all duration inputs without changing
 the projected clock-out. Stored global targets remain hours; stored unpaid values

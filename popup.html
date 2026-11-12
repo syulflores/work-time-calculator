@@ -41,7 +41,7 @@
         <div class="input-heading">
           <label id="unpaidOverrideLabel" class="override-label" data-tooltip="Manual override" hidden><input id="unpaidOverride" type="checkbox" aria-label="Manual unpaid time override" /></label>
           <div class="field-label">
-            <label for="break" id="breakLabel">Unpaid time (minutes)</label>
+            <label for="break" id="breakLabel">Unpaid time (Min)</label>
             <button id="unpaidHelpButton" class="info-button" type="button" aria-label="About unpaid time" aria-expanded="false" aria-controls="unpaidHelp">&#9432;</button>
           </div>
         </div>
@@ -54,7 +54,7 @@
       <div class="input-row">
         <div class="input-heading"><span>Paid target today</span></div>
         <button id="editTarget" class="settings-link" type="button">Set this in settings</button>
-        <span id="worked">480 minutes</span>
+        <span id="worked">480 Min</span>
       </div>
     </section>
     <section id="weeklyInputs" aria-label="Weekly time inputs"><div class="week-scroll"><table id="weekTable"></table></div><p id="weekHelp" class="foot"></p></section>
@@ -77,14 +77,14 @@
         <label>Calculate for
           <select id="periodMode"><option value="week">Week</option><option value="day">Day</option></select>
         </label>
-        <label><span id="weeklyTargetLabel">Weekly target (hours)</span>
+        <label><span id="weeklyTargetLabel">Weekly target (Hrs)</span>
           <input id="weeklyTarget" type="number" min="0" max="168" step="any" value="40" />
         </label>
-        <label><span id="dailyTargetLabel">Daily target (hours)</span>
+        <label><span id="dailyTargetLabel">Daily target (Hrs)</span>
           <input id="dailyTarget" type="number" min="0" max="24" step="any" value="8" />
         </label>
         <label>Time units
-          <select id="timeUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option></select>
+          <select id="timeUnit"><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="hoursMinutes">Hours:Minutes</option></select>
         </label>
         <label>Countdown
           <select id="countdownMode"><option value="working">Working hours</option><option value="elapsed">Elapsed time</option></select>

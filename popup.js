@@ -3,7 +3,29 @@ const localDay = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const unitSeconds = () => $("timeUnit").value === "hours" ? 3600 : 60;
 const displayNumber = (value) => Number(Number(value).toFixed(10));
-const fmt = (secs) => `${Number((Math.max(0, secs) / unitSeconds()).toFixed(2))} ${$("timeUnit").value === "hours" ? "hours" : "minutes"}`;
+const hoursMinutes = () => $("timeUnit").value === "hoursMinutes";
+const unitLabel = () => hoursMinutes() ? "HH:MM" : $("timeUnit").value === "hours" ? "Hrs" : "Min";
+const durationValue = (secs) => {
+  if (!hoursMinutes()) return displayNumber(secs / unitSeconds());
+  const minutes = Math.round(Math.max(0, secs) / 60);
+  return Math.floor(minutes / 60) + ":" + String(minutes % 60).padStart(2, "0");
+};
+const durationSeconds = (value) => {
+  if (!hoursMinutes()) return Math.max(0, Number(value) || 0) * unitSeconds();
+  const match = /^(\d+):([0-5]\d)$/.exec(String(value).trim());
+  return match ? (Number(match[1]) * 60 + Number(match[2])) * 60 : 0;
+};
+function configureDurationInput(input) {
+  input.type = hoursMinutes() ? "text" : "number";
+  if (hoursMinutes()) {
+    input.placeholder = "HH:MM";
+    input.pattern = "[0-9]+:[0-5][0-9]";
+  } else {
+    input.removeAttribute("placeholder");
+    input.removeAttribute("pattern");
+  }
+}
+const fmt = (secs) => `${hoursMinutes() ? durationValue(secs) : Number((Math.max(0, secs) / unitSeconds()).toFixed(2))} ${unitLabel()}`;
 const dateTime = (ms) =>
   new Date(ms).toLocaleString([], {
     weekday: "short",
@@ -32,12 +54,11 @@ const gatheredUnpaid = () => !isManual() && data?.inputs?.todayRecords > 0 &&
 const useClockInput = () => $("manualEnabled").checked || gatheredClockIn() === null;
 const useUnpaidInput = () => $("unpaidOverride").checked || gatheredUnpaid() === null;
 // Saved unpaid values remain minutes, regardless of the displayed unit.
-const unpaidMinutes = () => Math.max(0, Number($("break").value) || 0) *
-  ($("timeUnit").value === "hours" ? 60 : 1);
+const unpaidMinutes = () => durationSeconds($("break").value) / 60;
 function updateUnpaidInput(restoreValue = true) {
   const hours = $("timeUnit").value === "hours";
-  const unit = hours ? "hours" : "minutes";
-  $("breakLabel").textContent = `Unpaid time (${unit})`;
+  configureDurationInput($("break"));
+  $("breakLabel").textContent = `Unpaid time (${unitLabel()})`;
   $("unpaidOverrideLabel").hidden = isManual();
   $("break").hidden = !useUnpaidInput();
   $("break").disabled = false;
@@ -45,7 +66,7 @@ function updateUnpaidInput(restoreValue = true) {
   $("providerUnpaid").textContent = gatheredUnpaid() === null ? "?" : fmt(gatheredUnpaid());
   $("break").max = hours ? "8" : "480";
   if (restoreValue) {
-    $("break").value = Number((Number(unpaidValues[$("mode").value]) / (hours ? 60 : 1)).toFixed(10));
+    $("break").value = durationValue(Number(unpaidValues[$("mode").value]) * 60);
   }
 }
 const periodValues = {
@@ -268,9 +289,9 @@ function renderWeek() {
     header.append(th);
   }
   const body = table.createTBody();
-  for (const [field, label] of [["firstClockIn", "Clock-in"], ["totalUnpaid", "Unpaid"], ["paidTarget", isManual() ? "Paid target" : "Paid hours / target"]]) {
+  for (const [field, label] of [["firstClockIn", "Clock-in"], ["totalUnpaid", "Unpaid"], ["paidTarget", isManual() ? "Paid target" : "Paid time / target"]]) {
     const row = body.insertRow(), heading = document.createElement("th"); heading.scope = "row";
-    heading.textContent = label + (field !== "firstClockIn" ? ` (${$("timeUnit").value})` : ""); row.append(heading);
+    heading.textContent = label + (field === "firstClockIn" ? "" : ` (${unitLabel()})`); row.append(heading);
     for (const date of dates) {
       const key = localDay(date), state = weeklyField(key, field), cell = row.insertCell();
       const wrap = document.createElement("div"); wrap.className = "week-value";
@@ -293,11 +314,14 @@ function renderWeek() {
           }
         }
         const input = document.createElement("input");
-        input.type = "number"; input.min = "0"; input.step = "any";
-        input.setAttribute("aria-label", `${name} (${$("timeUnit").value})`);
-        input.value = displayNumber(weeklyPaidTarget(date) / unitSeconds());
+        configureDurationInput(input); input.min = "0"; input.step = "any";
+        input.setAttribute("aria-label", field === "firstClockIn" ? name : `${name} (${unitLabel()})`);
+        input.value = durationValue(weeklyPaidTarget(date));
         input.title = "Planned paid time. Set 0 for a day off; clear to use the default.";
-        input.addEventListener("change", () => save(field, input.value === "" ? null : Math.max(0, Number(input.value) || 0) * unitSeconds()));
+        input.addEventListener("change", () => {
+          if (!input.reportValidity()) return;
+          save(field, input.value === "" ? null : durationSeconds(input.value));
+        });
         wrap.append(input); cell.append(wrap); continue;
       }
       if (!isManual()) {
@@ -308,10 +332,13 @@ function renderWeek() {
       }
       if (state.manual) {
         const input = document.createElement("input"); input.type = field === "firstClockIn" ? "time" : "number";
-        input.setAttribute("aria-label", name);
-        if (field === "totalUnpaid") { input.min = "0"; input.step = "any"; }
-        input.value = field === "totalUnpaid" ? displayNumber(Number(state.value) * 60 / unitSeconds()) : state.value;
-        input.addEventListener("change", () => save(field, field === "totalUnpaid" ? Math.max(0, Number(input.value) || 0) * unitSeconds() / 60 : input.value)); wrap.append(input);
+        input.setAttribute("aria-label", field === "firstClockIn" ? name : `${name} (${unitLabel()})`);
+        if (field === "totalUnpaid") { configureDurationInput(input); input.min = "0"; input.step = "any"; }
+        input.value = field === "totalUnpaid" ? durationValue(Number(state.value) * 60) : state.value;
+        input.addEventListener("change", () => {
+          if (!input.reportValidity()) return;
+          save(field, field === "totalUnpaid" ? durationSeconds(input.value) / 60 : input.value);
+        }); wrap.append(input);
       } else {
         const value = document.createElement("span");
         value.textContent = field === "firstClockIn" ? new Date(state.value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : fmt(state.value); wrap.append(value);
@@ -514,13 +541,12 @@ async function refreshPaychex() {
   unpaidValues.manual = saved.manualTotalUnpaid ?? "0";
   unpaidValues.paychex = saved.paychexUnpaidOverride ?? "0";
   $("unpaidOverride").checked = !!saved.unpaidOverride;
-  $("timeUnit").value = (saved.timeUnit ?? saved.breakUnit) === "hours" ? "hours" : "minutes";
-  function updateTimeInputs() {
-    const unit = $("timeUnit").value;
-    for (const [period, id, max] of [["week", "weeklyTarget", 168], ["day", "dailyTarget", 24]]) {
-      $(id).value = displayNumber(Number(periodValues[period].target) * 3600 / unitSeconds());
+  $("timeUnit").value = ["hours", "hoursMinutes"].includes(saved.timeUnit ?? saved.breakUnit) ? (saved.timeUnit ?? saved.breakUnit) : "minutes";
+  function updateTimeInputs() {    for (const [period, id, max] of [["week", "weeklyTarget", 168], ["day", "dailyTarget", 24]]) {
+      configureDurationInput($(id));
+      $(id).value = durationValue(Number(periodValues[period].target) * 3600);
       $(id).max = max * 3600 / unitSeconds();
-      $(id + "Label").textContent = (period === "week" ? "Weekly" : "Daily") + " target (" + unit + ")";
+      $(id + "Label").textContent = (period === "week" ? "Weekly" : "Daily") + ` target (${unitLabel()})`;
     }
     updateUnpaidInput();
   }
@@ -531,7 +557,8 @@ async function refreshPaychex() {
   });
   for (const [period, id, storageKey] of [["week", "weeklyTarget", "target"], ["day", "dailyTarget", "dailyTarget"]]) {
     $(id).addEventListener("change", () => {
-      periodValues[period].target = Math.max(0, Number($(id).value) || 0) * unitSeconds() / 3600;
+      if (!$(id).reportValidity()) return;
+      periodValues[period].target = durationSeconds($(id).value) / 3600;
       chrome.storage.local.set({ [storageKey]: periodValues[period].target });
       calculate();
     });
@@ -539,6 +566,7 @@ async function refreshPaychex() {
   updateTimeInputs();
   for (const key of ["start", "break"])
     $(key).addEventListener("change", () => {
+      if (!$(key).reportValidity()) return;
       let value = $(key).value;
       let storageKey = key;
       if (key === "break") {

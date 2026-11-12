@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.8.1
+
+- fix: added new time units
+
 ## 0.8.0
 
 - feat: fully restructured the weekly mode and how it is displayed
