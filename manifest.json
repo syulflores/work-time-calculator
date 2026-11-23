@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Work Time Calculator",
-  "version": "0.8.2",
+  "name": "Work Time Left",
+  "version": "0.8.3",
   "description": "Read-only work hours calculator to see what time you need to clock out by.",
   "permissions": [
     "activeTab",
@@ -12,7 +12,7 @@
     "https://paychex.centralservers.com/*"
   ],
   "action": {
-    "default_title": "Weekly hours",
+    "default_title": "Work Time Left",
     "default_popup": "popup.html"
   }
 }

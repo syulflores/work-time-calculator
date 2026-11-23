@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.8.3
+
+- fix: standardized name throughout
+
 ## 0.8.2
 
 - fix: added icons but haven't referenced them yet

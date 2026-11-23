@@ -1,4 +1,4 @@
-# Work Time Calculator
+# Work Time Left
 
 A Chrome extension that estimates daily or weekly clock-out time from manual inputs or your Paychex timecard.
 
@@ -18,7 +18,7 @@ The extension is read-only: it uses timecard responses loaded by Paychex itself 
 2. Open `chrome://extensions` in Google Chrome.
 3. Enable **Developer mode**.
 4. Click **Load unpacked** and select the project folder containing `manifest.json`.
-5. Optionally pin **Work Time Calculator** to the Chrome toolbar.
+5. Optionally pin **Work Time Left** to the Chrome toolbar.
 
 No build step or additional dependencies are required. Microsoft Edge can also load the extension through `edge://extensions` using the same steps.
 
