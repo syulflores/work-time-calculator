@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.9.2
+
+- fix: updated manifest to use icons
+
 ## 0.9.1
 
 - fix: updated icon to work for light and dark mode themes
