@@ -13,9 +13,12 @@
         <button id="closeSettings" class="icon-button" type="button" aria-label="Back to calculator" title="Back to calculator" hidden><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 6 9 12 15 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
         <div class="heading-text">
           <h2 id="pageTitle">Work Time Left</h2>
-          <p id="modeSubtitle">Mode: Manual</p>
+          <div id="modeRow" class="mode-row">
+            <button id="periodToggle" class="refresh-button" type="button" title="Switch to daily calculation">Weekly</button>
+            <p id="modeSubtitle">Mode: Manual</p>
+          </div>
         </div>
-        <button id="refresh" type="button">Recalculate</button>
+        <button id="refresh" class="refresh-button" type="button">Recalculate</button>
         <button id="openSettings" class="icon-button" type="button" aria-label="Settings" title="Settings" aria-controls="settingsPage" aria-expanded="false">&#9881;&#65038;</button>
       </div>
     </header>

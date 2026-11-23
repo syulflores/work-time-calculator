@@ -117,9 +117,15 @@ h2 {
   line-height: 1.25;
 }
 
+.mode-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+}
+
 #modeSubtitle {
-  display: inline-block;
-  margin: 5px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
@@ -393,11 +399,7 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 #period, #detail { margin: 6px 1px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 #period { font-weight: 600; color: var(--period); }
 #period:empty, #detail:empty { display: none; }
-#refresh {
-  flex: 0 0 112px;
-  width: 112px;
-  min-height: 34px;
-  padding: 6px 8px;
+.refresh-button {
   font-size: 11px;
   line-height: 1.3;
   border-color: var(--refresh-border);
@@ -406,7 +408,21 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
   box-shadow: 0 2px 3px #087e8b08;
 }
 
-#refresh:hover { border-color: var(--refresh-hover-border); background: var(--refresh-hover); }
+.refresh-button:hover { border-color: var(--refresh-hover-border); background: var(--refresh-hover); }
+
+#refresh {
+  flex: 0 0 112px;
+  width: 112px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+#periodToggle {
+  flex: 0 0 56px;
+  width: 56px;
+  min-height: 24px;
+  padding: 3px 6px;
+}
 
 .foot { margin: 10px 1px 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 

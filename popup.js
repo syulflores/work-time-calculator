@@ -532,11 +532,22 @@ async function refreshPaychex() {
   });
   periodValues.week.target = saved.target ?? "40";
   periodValues.day.target = saved.dailyTarget ?? "8";
+  const periodToggle = $("periodToggle");
+  function updatePeriodToggle() {
+    periodToggle.textContent = isDaily() ? "Daily" : "Weekly";
+    periodToggle.title = isDaily() ? "Switch to weekly calculation" : "Switch to daily calculation";
+  }
+  function changePeriod(value) {
+    $("periodMode").value = value;
+    updatePeriodToggle();
+    chrome.storage.local.set({ periodMode: value });
+    if (isManual()) refreshManual();
+    else refresh();
+  }
   $("periodMode").value = saved.periodMode === "day" ? "day" : "week";
-  $("periodMode").addEventListener("change", () => {
-    chrome.storage.local.set({ periodMode: $("periodMode").value });
-    calculate();
-  });
+  updatePeriodToggle();
+  $("periodMode").addEventListener("change", () => changePeriod($("periodMode").value));
+  periodToggle.addEventListener("click", () => changePeriod(isDaily() ? "week" : "day"));
   if (saved.start != null) $("start").value = saved.start;
   unpaidValues.manual = saved.manualTotalUnpaid ?? "0";
   unpaidValues.paychex = saved.paychexUnpaidOverride ?? "0";
@@ -585,7 +596,7 @@ async function refreshPaychex() {
     $("closeSettings").hidden = !show;
     $("openSettings").setAttribute("aria-expanded", String(show));
     $("pageTitle").textContent = show ? "Settings" : "Work Time Left";
-    $("modeSubtitle").hidden = show;
+    $("modeRow").hidden = show;
     (show ? $("closeSettings") : $("openSettings")).focus();
   }
   for (const [buttonId, helpId] of [["clockHelpButton", "clockHelp"], ["unpaidHelpButton", "unpaidHelp"]]) {
