@@ -86,13 +86,16 @@
     function summarize(date) {
       const daily = rows.filter((row) => row.date === date);
       const punches = daily.filter((row) => row.in !== null && row.in <= now).sort((a, b) => a.in - b.in);
-      let gap = 0, coveredUntil = null;
+      let gap = 0, coveredUntil = null, lastClockOut = null, hasOpenPunch = false;
       for (const row of punches) {
         if (coveredUntil !== null && row.in > coveredUntil) gap += (row.in - coveredUntil) / 1000;
         const finish = row.out === null ? now : Math.min(now, Math.max(row.in, row.out));
         coveredUntil = Math.max(coveredUntil ?? row.in, finish);
+        if (row.out === null || row.out > now) hasOpenPunch = true;
+        else if (row.out >= row.in) lastClockOut = Math.max(lastClockOut ?? row.out, row.out);
       }
       return { firstClockIn: punches[0]?.in ?? null,
+        lastClockOut: hasOpenPunch ? null : lastClockOut,
         paidSeconds: daily.reduce((sum, row) => sum + row.regular + row.ot, 0),
         totalUnpaid: daily.length ? Math.max(gap, daily.reduce((sum, row) => sum + row.unpaid, 0)) : null,
         records: daily.length };

@@ -32,6 +32,11 @@ const dateTime = (ms) =>
     hour: "numeric",
     minute: "2-digit",
   });
+const clockTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const clockInputValue = (ms) => {
+  const date = new Date(ms);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+};
 // Register future modes with their own refresh handler here.
 const modes = {
   manual: { label: "Manual", refresh: refreshManual },
@@ -42,6 +47,7 @@ let refreshId = 0;
 let integrationQueue = Promise.resolve();
 const isManual = () => $("mode").value === "manual";
 const isDaily = () => $("periodMode").value === "day";
+const useWeeklyClockOut = () => $("weeklyPaidEntry").value === "clockOut";
 function setStatus(message, error = false) {
   $("status").textContent = message;
   $("status").dataset.state = error ? "error" : "ok";
@@ -89,7 +95,7 @@ function updateClockInput() {
   $("manualIn").required = manual;
   $("providerClockIn").hidden = manual;
   $("providerClockIn").textContent = gatheredClockIn() === null ? "?"
-    : new Date(gatheredClockIn()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    : clockTime(gatheredClockIn());
 }
 
 function refresh(requestAccess = false) {
@@ -197,6 +203,11 @@ const clockMinutes = (s) => {
   const [h, m] = s.split(":").map(Number);
   return h < 24 && m < 60 ? h * 60 + m : null;
 };
+function clockOnDate(date, value) {
+  const minutes = clockMinutes(value);
+  return minutes === null ? null : new Date(date.getFullYear(), date.getMonth(), date.getDate(),
+    Math.floor(minutes / 60), minutes % 60).getTime();
+}
 
 // Break timing is unavailable: subtract the entered total from elapsed shift time.
 function remainingPaid(start, paid, unpaid, now) {
@@ -222,17 +233,21 @@ function weeklyEstimate(start, target, unpaid, now, dailyTarget, dates, dayPlan)
     if (key < today) continue;
     const plan = dayPlan(key);
     const explicitStart = plan.clock !== null;
-    const dayTarget = plan.paidTarget ?? dailyTarget;
-    if (dayTarget <= 0) continue;
-    if (key !== today && !explicitStart && plan.paidTarget == null && (date.getDay() === 0 || date.getDay() === 6)) continue;
     const clock = key === today ? new Date(start) : new Date(date);
     if (key !== today) {
       const fallback = new Date(start);
       const minutes = explicitStart ? plan.clock : fallback.getHours() * 60 + fallback.getMinutes();
       clock.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
     }
-    const paid = Math.min(left, dayTarget);
     const dayUnpaid = key === today ? unpaid : plan.unpaid ?? unpaid;
+    const plannedOut = clockOnDate(date, plan.clockOut);
+    const hasPlannedOut = plannedOut !== null && plannedOut >= clock.getTime();
+    const dayTarget = hasPlannedOut
+      ? Math.max(0, (plannedOut - clock.getTime()) / 1000 - dayUnpaid)
+      : plan.paidTarget ?? dailyTarget;
+    if (dayTarget <= 0) continue;
+    if (key !== today && !explicitStart && !hasPlannedOut && plan.paidTarget == null && (date.getDay() === 0 || date.getDay() === 6)) continue;
+    const paid = Math.min(left, dayTarget);
     workingRemaining += remainingPaid(clock.getTime(), paid, dayUnpaid, now);
     lastOut = clock.getTime() + (paid + dayUnpaid) * 1000;
     left -= paid;
@@ -256,22 +271,36 @@ function weeklyField(date, field) {
   const manual = isManual() || saved[field + "Override"] === true || !Number.isFinite(gathered);
   return { saved, manual, value: manual ? saved[field] ?? (field === "totalUnpaid" ? 0 : "") : gathered };
 }
+function weeklyClockOutOverride(date, now) {
+  if (!useWeeklyClockOut() || localDay(date) > localDay(now)) return null;
+  const key = localDay(date);
+  const clockOut = weeklyField(key, "lastClockOut");
+  if (!clockOut.manual) return null;
+  const out = clockOnDate(date, clockOut.value);
+  if (out === null || out > now.getTime()) return null;
+  const clockIn = weeklyField(key, "firstClockIn");
+  const start = clockIn.manual ? clockOnDate(date, clockIn.value) : clockIn.value;
+  if (start === null || out < start) return null;
+  const unpaid = weeklyField(key, "totalUnpaid");
+  const unpaidSeconds = Number(unpaid.value) * (unpaid.manual ? 60 : 1);
+  return { out, paid: Math.max(0, (out - start) / 1000 - unpaidSeconds) };
+}
 function weeklyPaidTarget(date) {
   const key = localDay(date);
   const values = weeklyValues[$("mode").value]?.[key] || {};
   const recorded = !isManual() && key < localDay(new Date()) && data?.inputs
     ? data.inputs.days?.[key]?.paidSeconds ?? 0 : null;
-  if (recorded !== null && values.paidTargetOverride !== true) return recorded;
+  if (recorded !== null && (useWeeklyClockOut() || values.paidTargetOverride !== true)) return recorded;
   const saved = values.paidTarget;
   if (Number.isFinite(saved) && saved >= 0) return saved;
   if (recorded !== null) return recorded;
   return date.getDay() === 0 || date.getDay() === 6 ? 0 : Math.max(0, Number(periodValues.day.target) || 0) * 3600;
 }
-function weeklyPreviousPaid(dates, today) {
+function weeklyPreviousPaid(dates, today, now) {
   return dates.filter((date) => localDay(date) < today)
-    .reduce((total, date) => total + weeklyPaidTarget(date), 0);
+    .reduce((total, date) => total + (weeklyClockOutOverride(date, now)?.paid ?? weeklyPaidTarget(date)), 0);
 }
-function renderWeek() {
+function renderWeek(today) {
   $("dailyInputs").hidden = !isDaily();
   $("weeklyInputs").hidden = isDaily();
   document.documentElement.classList.toggle("weekly", !isDaily());
@@ -285,15 +314,18 @@ function renderWeek() {
     th.textContent = date.toLocaleDateString([], { weekday: "short" });
     const small = document.createElement("small");
     small.textContent = date.toLocaleDateString([], { month: "numeric", day: "numeric" }); th.append(small);
-    if (localDay(date) === localDay(new Date())) th.className = "today";
+    if (localDay(date) === today) th.className = "today";
     header.append(th);
   }
   const body = table.createTBody();
-  for (const [field, label] of [["firstClockIn", "Clock-in"], ["totalUnpaid", "Unpaid"], ["paidTarget", isManual() ? "Paid target" : "Paid time / target"]]) {
+  const paidRow = useWeeklyClockOut() ? ["lastClockOut", "Clock-out"] : ["paidTarget", isManual() ? "Paid target" : "Paid time / target"];
+  for (const [field, label] of [["firstClockIn", "Clock-in"], ["totalUnpaid", "Unpaid"], paidRow]) {
     const row = body.insertRow(), heading = document.createElement("th"); heading.scope = "row";
-    heading.textContent = label + (field === "firstClockIn" ? "" : ` (${unitLabel()})`); row.append(heading);
+    const clock = field === "firstClockIn" || field === "lastClockOut";
+    heading.textContent = clock ? label : `${label} (${unitLabel()})`; row.append(heading);
     for (const date of dates) {
-      const key = localDay(date), state = weeklyField(key, field), cell = row.insertCell();
+      const key = localDay(date);
+      const state = weeklyField(key, field), cell = row.insertCell();
       const wrap = document.createElement("div"); wrap.className = "week-value";
       const name = `${date.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })} ${label}`;
       const save = (property, value) => {
@@ -315,7 +347,7 @@ function renderWeek() {
         }
         const input = document.createElement("input");
         configureDurationInput(input); input.min = "0"; input.step = "any";
-        input.setAttribute("aria-label", field === "firstClockIn" ? name : `${name} (${unitLabel()})`);
+        input.setAttribute("aria-label", `${name} (${unitLabel()})`);
         input.value = durationValue(weeklyPaidTarget(date));
         input.title = "Planned paid time. Set 0 for a day off; clear to use the default.";
         input.addEventListener("change", () => {
@@ -330,25 +362,31 @@ function renderWeek() {
         check.title = "Manual override"; check.setAttribute("aria-label", `Manual override: ${name}`);
         check.addEventListener("change", () => save(field + "Override", check.checked)); wrap.append(check);
       }
-      if (state.manual) {
-        const input = document.createElement("input"); input.type = field === "firstClockIn" ? "time" : "number";
-        input.setAttribute("aria-label", field === "firstClockIn" ? name : `${name} (${unitLabel()})`);
+      if (state.manual || field === "lastClockOut") {
+        const input = document.createElement("input"); input.type = clock ? "time" : "number";
+        input.setAttribute("aria-label", clock ? name : `${name} (${unitLabel()})`);
         if (field === "totalUnpaid") { configureDurationInput(input); input.min = "0"; input.step = "any"; }
-        input.value = field === "totalUnpaid" ? durationValue(Number(state.value) * 60) : state.value;
+        input.readOnly = !state.manual;
+        input.value = !state.manual ? clockInputValue(state.value)
+          : field === "totalUnpaid" ? durationValue(Number(state.value) * 60) : state.value;
         input.addEventListener("change", () => {
-          if (!input.reportValidity()) return;
+          if (input.readOnly || !input.reportValidity()) return;
           save(field, field === "totalUnpaid" ? durationSeconds(input.value) / 60 : input.value);
         }); wrap.append(input);
       } else {
         const value = document.createElement("span");
-        value.textContent = field === "firstClockIn" ? new Date(state.value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : fmt(state.value); wrap.append(value);
+        value.textContent = clock ? clockTime(state.value) : fmt(state.value); wrap.append(value);
       }
       cell.append(wrap);
     }
   }
-  $("weekHelp").textContent = "Projection uses each remaining day's paid target. Set 0 for a day off; clear to restore the default. " + (isManual()
-    ? "Past paid targets count as completed paid time. "
-    : "Completed days show recorded regular and overtime hours; today and future days show planned targets. Check a paid-hours field to override it. ") + "Blank future days use today's clock-in and unpaid time; enter planned values to change them." + (isManual() ? "" : " Check a field to override it; enter missing values directly.");
+  const paidHelp = useWeeklyClockOut()
+    ? (isManual() ? "" : "Paychex shows the last clock-out when all punches for that day are closed. ") +
+      "Enter today's clock-out when you're done working. Enter a future day's planned clock-out after its clock-in to set that day's paid hours, or leave it blank to use the paid target. "
+    : isManual()
+    ? "Past paid targets count as completed paid time. Set a paid target to 0 for a day off; clear it to restore the default. "
+    : "Completed days show recorded regular and overtime hours; today and future days show planned targets. Set a paid target to 0 for a day off; clear it to restore the default. ";
+  $("weekHelp").textContent = paidHelp + "Blank future clock-ins and unpaid times use today's values." + (isManual() ? "" : " Check a field to override it; enter missing values directly.");
 }
 
 function calculate() {
@@ -368,26 +406,29 @@ function calculate() {
     return;
   }
   const target = Math.max(0, Number(periodValues[$("periodMode").value].target) || 0) * 3600;
-  const previous = isDaily() ? 0 : weeklyPreviousPaid(weekDates(), today);
-  const todayTarget = Math.max(0, target - previous);
-  renderWeek();
+  const previous = isDaily() ? 0 : weeklyPreviousPaid(weekDates(), today, now);
+  const completedToday = isDaily() ? null : weeklyClockOutOverride(now, now);
+  const todayTarget = Math.max(0, target - previous - (completedToday?.paid ?? 0));
+  renderWeek(today);
   const weekClock = weeklyField(today, "firstClockIn"), weekUnpaid = weeklyField(today, "totalUnpaid");
   const takenUnpaid = gatheredUnpaid();
   const enteredUnpaid = unpaidMinutes() * 60;
   const totalUnpaid = !isDaily() ? Number(weekUnpaid.value) * (weekUnpaid.manual ? 60 : 1) : useUnpaidInput() ? enteredUnpaid : takenUnpaid;
-  const manual = !isDaily() ? (weekClock.manual ? clockMinutes(weekClock.value) : null) : useClockInput() ? clockMinutes($("manualIn").value) : null;
-  const manualStart = manual === null ? null : new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(manual / 60), manual % 60).getTime();
-  const start = !isDaily() ? (weekClock.manual ? manualStart : weekClock.value) : useClockInput() ? manualStart : gatheredClockIn();
+  const start = !isDaily() ? (weekClock.manual ? clockOnDate(now, weekClock.value) : weekClock.value)
+    : useClockInput() ? clockOnDate(now, $("manualIn").value) : gatheredClockIn();
   const validStart = start !== null && start <= nowMs;
   const dailyTarget = Math.max(0, Number(periodValues.day.target) || 0) * 3600;
   const estimate = !validStart ? null : isDaily()
     ? shiftEstimate(start, todayTarget, totalUnpaid, nowMs)
+    : completedToday && todayTarget === 0 ? { out: completedToday.out, remaining: 0, workingRemaining: 0 }
     : weeklyEstimate(start, todayTarget, totalUnpaid, nowMs, dailyTarget, weekDates(), (date) => {
       const clock = weeklyField(date, "firstClockIn"), unpaid = weeklyField(date, "totalUnpaid");
       const hasUnpaid = !unpaid.manual || Object.hasOwn(unpaid.saved, "totalUnpaid");
+      const clockOut = useWeeklyClockOut() && date > today ? weeklyField(date, "lastClockOut") : null;
       return {
         clock: clock.manual ? clockMinutes(clock.value) : new Date(clock.value).getHours() * 60 + new Date(clock.value).getMinutes(),
-        paidTarget: weeklyPaidTarget(new Date(date + "T00:00:00")),
+        clockOut: clockOut?.manual ? clockOut.value : null,
+        paidTarget: completedToday && date === today ? 0 : weeklyPaidTarget(new Date(date + "T00:00:00")),
         unpaid: hasUnpaid ? Number(unpaid.value) * (unpaid.manual ? 60 : 1) : null,
       };
     });
@@ -399,6 +440,7 @@ function calculate() {
   $("period").textContent = isDaily() ? "" : "Workweek: " + first + " through " + last;
   $("detail").textContent =
     (isDaily() ? "" : "Earlier paid time: " + fmt(previous) + ". ") +
+    (completedToday ? "Today's paid time: " + fmt(completedToday.paid) + ". " : "") +
     (isManual() ? "Include all unpaid breaks for today, taken or planned. " :
       (takenUnpaid === null ? "Unpaid time unavailable. Using your entered total. " : "")) +
     (start !== null && !validStart ? "Clock-in must not be in the future. " : "") +
@@ -480,6 +522,7 @@ async function refreshPaychex() {
 (async () => {
   const saved = await chrome.storage.local.get([
     "countdownMode",
+    "weeklyPaidEntry",
     "weeklyValues",
     "darkMode",
     "mode",
@@ -509,6 +552,11 @@ async function refreshPaychex() {
   $("countdownMode").value = saved.countdownMode === "elapsed" ? "elapsed" : "working";
   $("countdownMode").addEventListener("change", () => {
     chrome.storage.local.set({ countdownMode: $("countdownMode").value });
+    calculate();
+  });
+  $("weeklyPaidEntry").value = saved.weeklyPaidEntry === "clockOut" ? "clockOut" : "duration";
+  $("weeklyPaidEntry").addEventListener("change", () => {
+    chrome.storage.local.set({ weeklyPaidEntry: $("weeklyPaidEntry").value });
     calculate();
   });
   weeklyValues = saved.weeklyValues || {};

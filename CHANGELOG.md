@@ -2,6 +2,10 @@
 
 All notable changes are documented here automatically by git-semver-hooks.
 
+## 0.9.3
+
+- fix: added option for clock out time as well as total daily hours
+
 ## 0.9.2
 
 - fix: updated manifest to use icons
